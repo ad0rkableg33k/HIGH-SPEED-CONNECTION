@@ -1833,7 +1833,11 @@ ${DASH_CSS}
 <div class="layout">
   <div class="sidebar">
     <div class="sidebar-section">Server</div>
-    ${allowedGuildIds.length > 1 ? `<div style="padding:.5rem 1rem;"><select onchange="location.href=window.location.pathname+'?guild='+this.value">${guildOptions}</select></div>` : ''}
+    <div style="padding:.35rem .75rem .75rem;">
+      <select onchange="location.href=window.location.pathname+'?guild='+this.value" style="width:100%;max-width:100%;">
+        ${guildOptions || `<option value="${guildId}">${client.guilds.cache.get(guildId)?.name || guildId}</option>`}
+      </select>
+    </div>
     <div class="sidebar-section">Pages</div>
     ${sidebarLinks}
     <div class="sidebar-section">Legal</div>
@@ -1841,7 +1845,6 @@ ${DASH_CSS}
     <a href="/privacy${guildId ? '?guild='+guildId : ''}">Privacy Policy</a>
   </div>
   <div class="main">
-    ${guildId && allowedGuildIds.length === 1 ? `<div style="font-size:.8rem;color:var(--muted);margin-bottom:1.5rem;">Server: <strong style="color:var(--text)">${client.guilds.cache.get(guildId)?.name || guildId}</strong></div>` : ''}
     ${body}
   </div>
 </div>
@@ -2697,11 +2700,9 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   async function postJoinMessage(member, vcChannel) {
     if (!member || member.user.bot) return;
 
-    // Roles to tag in the message
     const tagRoleIds = cfg.tagRoleIds?.length ? cfg.tagRoleIds : [];
     const roleMentions = tagRoleIds.map(id => `<@&${id}>`).join(' ');
 
-    // Custom message with variable substitution
     const buildMsg = (custom) => custom
       ? custom
           .replace(/{user}/g,    `${member}`)
@@ -2711,17 +2712,28 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
       : `🔊 ${member} joined **${vcChannel?.name || 'a voice channel'}**${roleMentions ? ` · ${roleMentions}` : ''}`;
 
     const nonBotSize = vcChannel?.members?.filter(m => !m.user.bot).size ?? 0;
-    const isNewlyActive = nonBotSize === 1; // channel just went 0→1
+    const isNewlyActive = nonBotSize === 1;
 
-    // 1. Post inside the VC's linked text channel (vcTextChannelId)
-    if (cfg.vcTextChannelId) {
-      const vcText = guild.channels.cache.get(cfg.vcTextChannelId);
+    // Resolve vcTextChannelId — supports plain ID or a Discord channel URL
+    // e.g. https://discord.com/channels/GUILD_ID/CHANNEL_ID
+    let resolvedVcTextId = cfg.vcTextChannelId;
+    if (resolvedVcTextId) {
+      const urlMatch = resolvedVcTextId.match(/\/channels\/\d+\/(\d+)/);
+      if (urlMatch) resolvedVcTextId = urlMatch[1];
+    }
+
+    // 1. Post to the configured VC text channel (ID or URL)
+    if (resolvedVcTextId) {
+      const vcText = guild.channels.cache.get(resolvedVcTextId);
       if (vcText) await vcText.send(buildMsg(cfg.announceMsg)).catch(() => {});
     }
 
     // 2. Post to the separate announcement channel when VC goes 0→1
     if (cfg.announceChannelId && isNewlyActive) {
-      const announceChannel = guild.channels.cache.get(cfg.announceChannelId);
+      let resolvedAnnounceId = cfg.announceChannelId;
+      const urlMatch = resolvedAnnounceId?.match(/\/channels\/\d+\/(\d+)/);
+      if (urlMatch) resolvedAnnounceId = urlMatch[1];
+      const announceChannel = guild.channels.cache.get(resolvedAnnounceId);
       if (announceChannel) await announceChannel.send(buildMsg(cfg.announceMsg)).catch(() => {});
     }
   }
@@ -2826,15 +2838,18 @@ app.get('/temproles', (req, res) => {
       <td><span style="color:var(--magenta)">@${role?.name || r.roleId}</span></td>
       <td>${r.durationMinutes} min</td>
       <td>
-        <form method="POST" action="/temproles/timed/postbutton?guild=${guildId}" style="display:flex;gap:.35rem;align-items:center;flex-wrap:wrap;">
+        <form method="POST" action="/temproles/timed/postbutton?guild=${guildId}" style="display:flex;flex-direction:column;gap:.35rem;">
           <input type="hidden" name="roleId" value="${r.roleId}">
           <input type="hidden" name="durationMinutes" value="${r.durationMinutes}">
-          <input type="text" placeholder="Search #..." oninput="fsearch(this,this.nextElementSibling)" style="width:100px;padding:.2rem .4rem;font-size:.78rem;">
-          <select name="channelId" style="flex:1;min-width:110px;padding:.2rem .4rem;font-size:.78rem;">
-            <option value="">— channel —</option>${chanOpts('')}
-          </select>
-          <input type="text" name="label" value="Get Role" style="width:80px;padding:.2rem .4rem;font-size:.78rem;">
-          <button type="submit" class="btn btn-ghost" style="padding:.2rem .5rem;font-size:.75rem;">📤 Post</button>
+          <div style="display:flex;gap:.35rem;align-items:center;flex-wrap:wrap;">
+            <input type="text" placeholder="Search #..." oninput="fsearch(this,this.nextElementSibling)" style="width:90px;padding:.2rem .4rem;font-size:.78rem;">
+            <select name="channelId" style="flex:1;min-width:110px;padding:.2rem .4rem;font-size:.78rem;">
+              <option value="">— channel —</option>${chanOpts('')}
+            </select>
+            <input type="text" name="label" value="Get Role" style="width:80px;padding:.2rem .4rem;font-size:.78rem;" placeholder="Button label">
+          </div>
+          <textarea name="message" rows="2" placeholder="Message above the button (optional)..." style="font-size:.78rem;padding:.3rem .5rem;resize:vertical;"></textarea>
+          <button type="submit" class="btn btn-ghost" style="padding:.25rem .6rem;font-size:.75rem;align-self:flex-start;">📤 Post Button</button>
         </form>
       </td>
       <td><form method="POST" action="/temproles/timed/delete?guild=${guildId}"><input type="hidden" name="index" value="${i}"><button type="submit" class="btn btn-danger" style="padding:.2rem .5rem;font-size:.75rem;">🗑</button></form></td>
@@ -2883,8 +2898,10 @@ app.get('/temproles', (req, res) => {
         </div>
 
         <div class="form-row"><label>VC text channel — join message posts here every time</label>
+          <p style="font-size:.75rem;color:var(--muted);margin-bottom:.4rem;">Paste a Discord channel URL (e.g. <code>https://discord.com/channels/.../...</code>) or select from the dropdown. VC text channels linked to a voice channel appear here too.</p>
+          <input type="text" name="vcTextChannelUrl" value="${cfg.vcTextChannelId||''}" placeholder="https://discord.com/channels/... or leave blank and use dropdown" style="margin-bottom:.4rem;">
           <input type="text" placeholder="Search #..." oninput="fsearch(this,this.nextElementSibling)" style="margin-bottom:.3rem;">
-          <select name="vcTextChannelId"><option value="">— none —</option>${chanOpts(cfg.vcTextChannelId)}</select>
+          <select name="vcTextChannelId"><option value="">— or select from list —</option>${chanOpts(cfg.vcTextChannelId)}</select>
         </div>
 
         <div class="form-row"><label>Announcement channel — posts only when VC goes 0 → 1 person</label>
@@ -2934,8 +2951,14 @@ app.post('/temproles/vc/save', (req, res) => {
   if (!tr[guildId]) tr[guildId] = {};
   const mc = req.body.monitoredChannelIds;
   const tr2 = req.body.tagRoleIds;
+  // vcTextChannelId — prefer the URL/ID text field, fall back to dropdown
+  let vcTextVal = req.body.vcTextChannelUrl?.trim() || req.body.vcTextChannelId || null;
+  if (vcTextVal) {
+    const urlMatch = vcTextVal.match(/\/channels\/\d+\/(\d+)/);
+    if (urlMatch) vcTextVal = urlMatch[1]; // extract channel ID from URL
+  }
   tr[guildId].vcRoleId            = req.body.vcRoleId || null;
-  tr[guildId].vcTextChannelId     = req.body.vcTextChannelId || null;
+  tr[guildId].vcTextChannelId     = vcTextVal || null;
   tr[guildId].announceChannelId   = req.body.announceChannelId || null;
   tr[guildId].announceMsg         = req.body.announceMsg?.trim() || null;
   tr[guildId].monitoredChannelIds = mc ? (Array.isArray(mc) ? mc : [mc]) : [];
@@ -2960,7 +2983,7 @@ app.post('/temproles/timed/save', (req, res) => {
 app.post('/temproles/timed/postbutton', async (req, res) => {
   const guildId = resolveGuildId(req);
   if (!guildId) return res.redirect('/');
-  const { roleId, channelId, label, durationMinutes } = req.body;
+  const { roleId, channelId, label, durationMinutes, message } = req.body;
   if (!channelId) return res.redirect(`/temproles?guild=${guildId}&flash=${encodeURIComponent('❌ Select a channel to post to.')}`);
   const guild = client.guilds.cache.get(guildId);
   const ch = guild?.channels.cache.get(channelId);
@@ -2968,10 +2991,9 @@ app.post('/temproles/timed/postbutton', async (req, res) => {
   try {
     const role = guild.roles.cache.get(roleId);
     const btn = new ButtonBuilder().setCustomId(`temprole:${roleId}`).setLabel(label?.trim() || 'Get Role').setStyle(ButtonStyle.Primary);
-    await ch.send({
-      content: `Click the button below to receive the **${role?.name || 'role'}** for ${durationMinutes} minute(s).`,
-      components: [new ActionRowBuilder().addComponents(btn)],
-    });
+    const content = message?.trim()
+      || `Click the button below to receive the **${role?.name || 'role'}** for ${durationMinutes} minute(s).`;
+    await ch.send({ content, components: [new ActionRowBuilder().addComponents(btn)] });
     res.redirect(`/temproles?guild=${guildId}&flash=${encodeURIComponent('✅ Button posted to #' + ch.name)}`);
   } catch (err) {
     res.redirect(`/temproles?guild=${guildId}&flash=${encodeURIComponent('❌ Error: ' + err.message)}`);
