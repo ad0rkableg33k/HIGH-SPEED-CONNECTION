@@ -784,38 +784,47 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 //  SETUP MENU (/setup command)
 // ===========================================================================
 function buildMainMenuMessage() {
-  const embed = new EmbedBuilder().setColor(0x8a2be2).setTitle('⚙️ HIGH-SPEED CONNECTION BOT Configuration')
-    .setDescription('Select a module to configure below. Everything saves instantly.');
-  const moduleSelect = new StringSelectMenuBuilder().setCustomId('setup:main:select').setPlaceholder('Select a module to configure...')
+  const embed = new EmbedBuilder().setColor(0x8a2be2).setTitle('⚙️ HIGH-SPEED CONNECTION BOT — Setup')
+    .setDescription('Select a feature to configure. Each module walks you through setup one step at a time.\n\n> Return here anytime with `/setup`.');
+  const moduleSelect = new StringSelectMenuBuilder().setCustomId('setup:main:select').setPlaceholder('Choose a feature to set up...')
     .addOptions(
-      { label: 'Camera Policy',  description: 'Cameras-on voice channel policy',             value: 'camera',   emoji: '📷' },
-      { label: 'Channel Index',  description: 'Exclusions & descriptions for /channel-index', value: 'chindex',  emoji: '#️⃣' },
+      { label: 'Camera Policy',   description: 'Enforce cameras-on in voice channels',            value: 'camera',      emoji: '📷' },
+      { label: 'Speed Match',     description: 'Configure speed matching events',                  value: 'speedmatch',  emoji: '💨' },
+      { label: 'Temp Roles',      description: 'VC presence roles and timed button roles',         value: 'temproles',   emoji: '🎭' },
+      { label: 'Sticky Notes',    description: 'Messages that re-pin at the bottom of a channel', value: 'sticky',      emoji: '📌' },
+      { label: 'Auto Responder',  description: 'Auto-reply to trigger words or phrases',           value: 'autorespond', emoji: '🤖' },
+      { label: 'Channel Index',   description: 'Exclusions & descriptions for /channel-index',    value: 'chindex',     emoji: '#️⃣' },
     );
   return { embeds: [embed], components: [new ActionRowBuilder().addComponents(moduleSelect)] };
 }
 
 function buildCameraMenuMessage(guildId) {
   const cfg = ensureGuildConfig(guildId); const catCount = cfg.monitoredCategoryIds?.length ?? 0;
-  const embed = new EmbedBuilder().setColor(0x2b2d31).setTitle('📷 Camera Policy Configuration')
+  const embed = new EmbedBuilder().setColor(0x2b2d31).setTitle('📷 Camera Policy — Setup')
     .setDescription(
       `**Status:** ${cfg.enabled ? '🟢 Enabled' : '🔴 Disabled'}\n` +
       `**Timing:** ${cfg.graceMinutes ?? DEFAULT_GRACE_MINUTES}m grace + ${cfg.warningMinutes ?? DEFAULT_WARNING_MINUTES}m warning\n` +
-      `**Announcement:** ${cfg.announcementUrl ? `[view post](${cfg.announcementUrl})` : 'Not set'}\n` +
+      `**Announcement Channel:** ${cfg.announcementChannelId ? `<#${cfg.announcementChannelId}>` : 'Not set'}\n` +
+      `**Announcement URL:** ${cfg.announcementUrl ? `[view post](${cfg.announcementUrl})` : 'Not set'}\n` +
       `**Monitored Channels:** ${cfg.monitoredChannels.length ? cfg.monitoredChannels.map(id => `<#${id}>`).join(', ') : 'Not set'}\n` +
       `**Monitored Categories:** ${catCount ? cfg.monitoredCategoryIds.map(id => `<#${id}>`).join(', ') : 'Not set'}\n` +
-      `**Exempt Roles:** ${cfg.exemptRoles.length ? cfg.exemptRoles.map(id => `<@&${id}>`).join(', ') : 'Not set'}`
+      `**Exempt Roles:** ${cfg.exemptRoles.length ? cfg.exemptRoles.map(id => `<@&${id}>`).join(', ') : 'Not set'}\n\n` +
+      `> 💡 You can select channels, categories, or both for monitoring.`
     );
   const topRow = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('setup:camera:toggle').setLabel(cfg.enabled ? 'Disable' : 'Enable').setStyle(cfg.enabled ? ButtonStyle.Danger : ButtonStyle.Success),
-    new ButtonBuilder().setCustomId('setup:camera:timing').setLabel('Set Timing').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup:camera:toggle').setLabel(cfg.enabled ? '🔴 Disable' : '🟢 Enable').setStyle(cfg.enabled ? ButtonStyle.Danger : ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('setup:camera:timing').setLabel('⏱ Set Timing').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup:camera:announcement').setLabel('📢 Announcement').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('setup:camera:categories-menu').setLabel('🗂 Categories').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('setup:main').setLabel('⬅ Back').setStyle(ButtonStyle.Secondary),
   );
   const channelSelect = new ChannelSelectMenuBuilder().setCustomId('setup:camera:channels:select').setPlaceholder('Select monitored voice channels...').setChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice).setMinValues(0).setMaxValues(25);
   if (cfg.monitoredChannels.length) channelSelect.setDefaultChannels(...cfg.monitoredChannels.slice(0, 25));
+  const announceSelect = new ChannelSelectMenuBuilder().setCustomId('setup:camera:announcechannel:select').setPlaceholder('Select announcement channel (optional)...').setChannelTypes(ChannelType.GuildText).setMinValues(0).setMaxValues(1);
+  if (cfg.announcementChannelId) announceSelect.setDefaultChannels(cfg.announcementChannelId);
   const roleSelect = new RoleSelectMenuBuilder().setCustomId('setup:camera:exempt:select').setPlaceholder('Select exempt role(s)...').setMinValues(0).setMaxValues(25);
   if (cfg.exemptRoles.length) roleSelect.setDefaultRoles(...cfg.exemptRoles.slice(0, 25));
-  return { embeds: [embed], components: [topRow, new ActionRowBuilder().addComponents(channelSelect), new ActionRowBuilder().addComponents(roleSelect)] };
+  return { embeds: [embed], components: [topRow, new ActionRowBuilder().addComponents(channelSelect), new ActionRowBuilder().addComponents(announceSelect), new ActionRowBuilder().addComponents(roleSelect)] };
 }
 
 function buildCameraCategoriesMenuMessage(guildId) {
@@ -836,12 +845,19 @@ client.on('interactionCreate', async (interaction) => {
     if (!interaction.isButton() && !interaction.isRoleSelectMenu() && !interaction.isChannelSelectMenu() && !interaction.isStringSelectMenu() && !interaction.isModalSubmit()) return;
 
     const guildId = interaction.guildId; const id = interaction.customId;
+
+    // ── Main menu ──────────────────────────────────────────────────────────
     if (id === 'setup:main') return interaction.update(buildMainMenuMessage());
     if (id === 'setup:main:select') {
-      const choice = interaction.values[0];
-      if (choice === 'camera') return interaction.update(buildCameraMenuMessage(guildId));
+      const v = interaction.values[0];
+      if (v === 'camera')     return interaction.update(buildCameraMenuMessage(guildId));
+      if (v === 'speedmatch') return interaction.update(buildSpeedMatchSetupMessage(guildId));
+      if (v === 'temproles')  return interaction.update(buildTempRolesSetupMessage(guildId));
+      if (v === 'sticky' || v === 'autorespond') return interaction.update(buildStickyARSetupMessage(guildId, v));
       return;
     }
+
+    // ── Camera ─────────────────────────────────────────────────────────────
     if (id === 'setup:camera:menu')            return interaction.update(buildCameraMenuMessage(guildId));
     if (id === 'setup:camera:categories-menu') return interaction.update(buildCameraCategoriesMenuMessage(guildId));
     if (id === 'setup:camera:toggle') {
@@ -849,37 +865,160 @@ client.on('interactionCreate', async (interaction) => {
       const saved = saveCameraConfig(cameraConfig);
       if (!cfg.enabled) clearAllCameraWarningsForGuild(guildId);
       await interaction.update(buildCameraMenuMessage(guildId));
-      if (!saved) await interaction.followUp({ content: '⚠️ Save failed — check Fly.io logs for DATA_DIR write error.', flags: MessageFlags.Ephemeral });
+      if (!saved) await interaction.followUp({ content: '⚠️ Save failed.', flags: MessageFlags.Ephemeral });
       return;
     }
-    if (id === 'setup:camera:channels:select') {
-      ensureGuildConfig(guildId).monitoredChannels = interaction.values;
-      saveCameraConfig(cameraConfig); return interaction.update(buildCameraMenuMessage(guildId));
-    }
-    if (id === 'setup:camera:categories:select') {
-      ensureGuildConfig(guildId).monitoredCategoryIds = interaction.values;
-      saveCameraConfig(cameraConfig); return interaction.update(buildCameraCategoriesMenuMessage(guildId));
-    }
-    if (id === 'setup:camera:exempt:select') {
-      ensureGuildConfig(guildId).exemptRoles = interaction.values;
-      saveCameraConfig(cameraConfig); return interaction.update(buildCameraMenuMessage(guildId));
-    }
+    if (id === 'setup:camera:channels:select') { ensureGuildConfig(guildId).monitoredChannels = interaction.values; saveCameraConfig(cameraConfig); return interaction.update(buildCameraMenuMessage(guildId)); }
+    if (id === 'setup:camera:announcechannel:select') { ensureGuildConfig(guildId).announcementChannelId = interaction.values[0] || null; saveCameraConfig(cameraConfig); return interaction.update(buildCameraMenuMessage(guildId)); }
+    if (id === 'setup:camera:categories:select') { ensureGuildConfig(guildId).monitoredCategoryIds = interaction.values; saveCameraConfig(cameraConfig); return interaction.update(buildCameraCategoriesMenuMessage(guildId)); }
+    if (id === 'setup:camera:exempt:select') { ensureGuildConfig(guildId).exemptRoles = interaction.values; saveCameraConfig(cameraConfig); return interaction.update(buildCameraMenuMessage(guildId)); }
     if (id === 'setup:camera:timing') {
       const cfg = ensureGuildConfig(guildId);
       const modal = new ModalBuilder().setCustomId('setup:camera:timing:modal').setTitle('Camera Policy Timing');
-      const graceInput   = new TextInputBuilder().setCustomId('grace').setLabel('Grace period (minutes, silent)').setStyle(TextInputStyle.Short).setValue(String(cfg.graceMinutes ?? DEFAULT_GRACE_MINUTES)).setRequired(true);
-      const warningInput = new TextInputBuilder().setCustomId('warning').setLabel('Warning period (minutes, after reminder)').setStyle(TextInputStyle.Short).setValue(String(cfg.warningMinutes ?? DEFAULT_WARNING_MINUTES)).setRequired(true);
-      modal.addComponents(new ActionRowBuilder().addComponents(graceInput), new ActionRowBuilder().addComponents(warningInput));
+      modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('grace').setLabel('Grace period (minutes, silent)').setStyle(TextInputStyle.Short).setValue(String(cfg.graceMinutes ?? DEFAULT_GRACE_MINUTES)).setRequired(true)), new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('warning').setLabel('Warning period (minutes)').setStyle(TextInputStyle.Short).setValue(String(cfg.warningMinutes ?? DEFAULT_WARNING_MINUTES)).setRequired(true)));
+      return interaction.showModal(modal);
+    }
+    if (id === 'setup:camera:announcement') {
+      const cfg = ensureGuildConfig(guildId);
+      const modal = new ModalBuilder().setCustomId('setup:camera:announcement:modal').setTitle('Camera Policy Announcement URL');
+      modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('url').setLabel('Announcement message link (optional)').setStyle(TextInputStyle.Short).setValue(cfg.announcementUrl || '').setRequired(false).setPlaceholder('https://discord.com/channels/...')));
       return interaction.showModal(modal);
     }
     if (id === 'setup:camera:timing:modal') {
       const grace = parseInt(interaction.fields.getTextInputValue('grace'), 10);
       const warning = parseInt(interaction.fields.getTextInputValue('warning'), 10);
-      if (!Number.isInteger(grace) || !Number.isInteger(warning) || grace < 0 || warning < 1)
-        return interaction.reply({ content: '❌ Grace must be 0+ and warning must be 1+ (whole numbers).', flags: MessageFlags.Ephemeral });
+      if (!Number.isInteger(grace) || !Number.isInteger(warning) || grace < 0 || warning < 1) return interaction.reply({ content: '❌ Grace must be 0+ and warning 1+.', flags: MessageFlags.Ephemeral });
       const cfg = ensureGuildConfig(guildId); cfg.graceMinutes = grace; cfg.warningMinutes = warning;
       saveCameraConfig(cameraConfig); return interaction.update(buildCameraMenuMessage(guildId));
     }
+    if (id === 'setup:camera:announcement:modal') {
+      ensureGuildConfig(guildId).announcementUrl = interaction.fields.getTextInputValue('url')?.trim() || null;
+      saveCameraConfig(cameraConfig); return interaction.update(buildCameraMenuMessage(guildId));
+    }
+
+    // ── Speed Match ────────────────────────────────────────────────────────
+    if (id === 'setup:sm:menu') return interaction.update(buildSpeedMatchSetupMessage(guildId));
+    if (id === 'setup:sm:lobby:select') { ensureVcShuffleGuildConfig(guildId).lobbyChannelIds = interaction.values; saveVcShuffleConfig(vcShuffleConfig); return interaction.update(buildSpeedMatchSetupMessage(guildId)); }
+    if (id === 'setup:sm:matchups:select') { ensureVcShuffleGuildConfig(guildId).matchupsChannelId = interaction.values[0] || null; saveVcShuffleConfig(vcShuffleConfig); return interaction.update(buildSpeedMatchSetupMessage(guildId)); }
+    if (id === 'setup:sm:staffpanel:select') { const c = ensureVcShuffleGuildConfig(guildId); c.staffPanelChannelId = interaction.values[0] || null; c.staffPanelMessageId = null; saveVcShuffleConfig(vcShuffleConfig); return interaction.update(buildSpeedMatchSetupMessage(guildId)); }
+    if (id === 'setup:sm:setinterval') {
+      const cfg = ensureVcShuffleGuildConfig(guildId);
+      const modal = new ModalBuilder().setCustomId('setup:sm:interval:modal').setTitle('Speed Match — Round Interval');
+      modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('min').setLabel('Min minutes per round').setStyle(TextInputStyle.Short).setValue(String(cfg.minIntervalMinutes ?? 3)).setRequired(true)), new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('max').setLabel('Max minutes per round').setStyle(TextInputStyle.Short).setValue(String(cfg.maxIntervalMinutes ?? 3)).setRequired(true)));
+      return interaction.showModal(modal);
+    }
+    if (id === 'setup:sm:interval:modal') {
+      const min = parseInt(interaction.fields.getTextInputValue('min'), 10); const max = parseInt(interaction.fields.getTextInputValue('max'), 10);
+      if (!Number.isInteger(min) || !Number.isInteger(max) || min < 1 || max < min) return interaction.reply({ content: '❌ Min must be 1+ and max ≥ min.', flags: MessageFlags.Ephemeral });
+      const cfg = ensureVcShuffleGuildConfig(guildId); cfg.minIntervalMinutes = min; cfg.maxIntervalMinutes = max; saveVcShuffleConfig(vcShuffleConfig);
+      return interaction.update(buildSpeedMatchSetupMessage(guildId));
+    }
+    if (id === 'setup:sm:start') {
+      const cfg = ensureVcShuffleGuildConfig(guildId);
+      if (!cfg.lobbyChannelIds?.length) return interaction.reply({ content: '❌ Set a lobby channel first.', flags: MessageFlags.Ephemeral });
+      await interaction.deferUpdate(); await startVcShuffle(interaction.guild, guildId, true);
+      return interaction.editReply(buildSpeedMatchSetupMessage(guildId));
+    }
+    if (id === 'setup:sm:bell') {
+      const state = shuffleState.get(guildId);
+      if (state?.warningTimeoutId) { clearTimeout(state.warningTimeoutId); state.warningTimeoutId = null; }
+      await interaction.deferUpdate(); await postBellMessage(interaction.guild, guildId); await runShuffleRound(interaction.guild, guildId); scheduleNextShuffle(interaction.guild, guildId); await refreshStaffPanel(interaction.guild, guildId);
+      return interaction.editReply(buildSpeedMatchSetupMessage(guildId));
+    }
+    if (id === 'setup:sm:stop') { await interaction.deferUpdate(); await stopVcShuffle(interaction.guild, guildId); return interaction.editReply(buildSpeedMatchSetupMessage(guildId)); }
+
+    // ── Temp Roles ─────────────────────────────────────────────────────────
+    if (id === 'setup:tr:menu') return interaction.update(buildTempRolesSetupMessage(guildId));
+    if (id === 'setup:tr:vcconfig') {
+      const modal = new ModalBuilder().setCustomId('setup:tr:vcconfig:modal').setTitle('VC Role Config');
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('roleId').setLabel('Role ID (right-click role → Copy ID)').setStyle(TextInputStyle.Short).setRequired(false)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('announceChannelId').setLabel('Announcement channel ID (optional)').setStyle(TextInputStyle.Short).setRequired(false)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('vcTextChannelId').setLabel('VC text channel ID (optional)').setStyle(TextInputStyle.Short).setRequired(false)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('announceMsg').setLabel('Custom message (optional)').setStyle(TextInputStyle.Paragraph).setRequired(false).setPlaceholder('{user} joined {channel}! {roles}')),
+      );
+      return interaction.showModal(modal);
+    }
+    if (id === 'setup:tr:vcconfig:modal') {
+      const tr = loadTR(); if (!tr[guildId]) tr[guildId] = {};
+      const roleId = interaction.fields.getTextInputValue('roleId')?.trim() || null;
+      const ac = interaction.fields.getTextInputValue('announceChannelId')?.trim() || null;
+      const vt = interaction.fields.getTextInputValue('vcTextChannelId')?.trim() || null;
+      const am = interaction.fields.getTextInputValue('announceMsg')?.trim() || null;
+      if (roleId) tr[guildId].vcRoleId = roleId;
+      if (ac) tr[guildId].announceChannelId = ac;
+      if (vt) tr[guildId].vcTextChannelId = vt;
+      if (am) tr[guildId].announceMsg = am;
+      saveTR(tr); return interaction.update(buildTempRolesSetupMessage(guildId));
+    }
+    if (id === 'setup:tr:addtimed') {
+      const modal = new ModalBuilder().setCustomId('setup:tr:addtimed:modal').setTitle('Add Timed Role');
+      modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('roleId').setLabel('Role ID').setStyle(TextInputStyle.Short).setRequired(true)), new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('duration').setLabel('Duration (minutes)').setStyle(TextInputStyle.Short).setRequired(true).setValue('30')));
+      return interaction.showModal(modal);
+    }
+    if (id === 'setup:tr:addtimed:modal') {
+      const tr = loadTR(); if (!tr[guildId]) tr[guildId] = {}; if (!tr[guildId].timedRoles) tr[guildId].timedRoles = [];
+      const roleId = interaction.fields.getTextInputValue('roleId')?.trim();
+      if (!roleId) return interaction.reply({ content: '❌ Role ID required.', flags: MessageFlags.Ephemeral });
+      tr[guildId].timedRoles.push({ roleId, durationMinutes: parseInt(interaction.fields.getTextInputValue('duration')) || 30 });
+      saveTR(tr); return interaction.update(buildTempRolesSetupMessage(guildId));
+    }
+    if (id === 'setup:tr:postbutton') {
+      const modal = new ModalBuilder().setCustomId('setup:tr:postbutton:modal').setTitle('Post Timed Role Button');
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('roleId').setLabel('Role ID').setStyle(TextInputStyle.Short).setRequired(true)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('channelId').setLabel('Channel ID to post button in').setStyle(TextInputStyle.Short).setRequired(true)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('label').setLabel('Button label').setStyle(TextInputStyle.Short).setRequired(false).setValue('Get Role')),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('message').setLabel('Message above button (optional)').setStyle(TextInputStyle.Paragraph).setRequired(false)),
+      );
+      return interaction.showModal(modal);
+    }
+    if (id === 'setup:tr:postbutton:modal') {
+      const roleId = interaction.fields.getTextInputValue('roleId')?.trim();
+      const channelId = interaction.fields.getTextInputValue('channelId')?.trim();
+      const label = interaction.fields.getTextInputValue('label')?.trim() || 'Get Role';
+      const message = interaction.fields.getTextInputValue('message')?.trim() || null;
+      const ch = interaction.guild.channels.cache.get(channelId);
+      if (!ch) return interaction.reply({ content: '❌ Channel not found.', flags: MessageFlags.Ephemeral });
+      await ch.send({ content: message || undefined, components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`temprole:${roleId}`).setLabel(label).setStyle(ButtonStyle.Primary))] });
+      return interaction.reply({ content: `✅ Button posted in <#${channelId}>!`, flags: MessageFlags.Ephemeral });
+    }
+
+    // ── Sticky ─────────────────────────────────────────────────────────────
+    if (id === 'setup:sticky:add') {
+      const modal = new ModalBuilder().setCustomId('setup:sticky:add:modal').setTitle('Add Sticky Note');
+      modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('channelId').setLabel('Channel ID').setStyle(TextInputStyle.Short).setRequired(true)), new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('content').setLabel('Sticky message content').setStyle(TextInputStyle.Paragraph).setRequired(true)));
+      return interaction.showModal(modal);
+    }
+    if (id === 'setup:sticky:add:modal') {
+      const channelId = interaction.fields.getTextInputValue('channelId')?.trim();
+      const content = interaction.fields.getTextInputValue('content')?.trim();
+      if (!channelId || !content) return interaction.reply({ content: '❌ Channel ID and message required.', flags: MessageFlags.Ephemeral });
+      const sticky = loadSticky(); if (!sticky[guildId]) sticky[guildId] = {};
+      sticky[guildId][channelId] = { content }; saveSticky(sticky);
+      return interaction.reply({ content: `✅ Sticky set for <#${channelId}>!`, flags: MessageFlags.Ephemeral });
+    }
+
+    // ── Auto Responder ─────────────────────────────────────────────────────
+    if (id === 'setup:ar:add') {
+      const modal = new ModalBuilder().setCustomId('setup:ar:add:modal').setTitle('Add Auto Responder');
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('trigger').setLabel('Trigger phrase').setStyle(TextInputStyle.Short).setRequired(true)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('matchType').setLabel('Match type: "contains" or "exact"').setStyle(TextInputStyle.Short).setRequired(true).setValue('contains')),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('response').setLabel('Response message').setStyle(TextInputStyle.Paragraph).setRequired(true)),
+      );
+      return interaction.showModal(modal);
+    }
+    if (id === 'setup:ar:add:modal') {
+      const trigger = interaction.fields.getTextInputValue('trigger')?.trim();
+      const matchType = interaction.fields.getTextInputValue('matchType')?.trim().toLowerCase() === 'exact' ? 'exact' : 'contains';
+      const response = interaction.fields.getTextInputValue('response')?.trim();
+      if (!trigger || !response) return interaction.reply({ content: '❌ Trigger and response required.', flags: MessageFlags.Ephemeral });
+      const ar = loadAR(); if (!ar[guildId]) ar[guildId] = [];
+      ar[guildId].push({ trigger, matchType, response }); saveAR(ar);
+      return interaction.reply({ content: `✅ Auto responder added! Trigger: \`${trigger}\` (${matchType})`, flags: MessageFlags.Ephemeral });
+    }
+
   } catch (err) {
     console.error('[setup] interaction error:', err);
     try {
@@ -888,6 +1027,51 @@ client.on('interactionCreate', async (interaction) => {
     } catch {}
   }
 });
+
+// Setup sub-menu builders
+function buildSpeedMatchSetupMessage(guildId) {
+  const cfg = ensureVcShuffleGuildConfig(guildId); const state = shuffleState.get(guildId); const running = cfg.enabled;
+  const embed = new EmbedBuilder().setColor(0x2b2d31).setTitle('💨 Speed Match — Setup')
+    .setDescription(`**Status:** ${running ? '🟢 Running' : '🔴 Idle'}\n**Mode:** ${cfg.connectionMode === 'role-based' ? 'Role-Based' : (cfg.minGroupSize === 1 ? '1-on-1' : `${cfg.minGroupSize}v${cfg.minGroupSize}`)}\n**Interval:** ${cfg.minIntervalMinutes}–${cfg.maxIntervalMinutes} min\n**Lobbies:** ${cfg.lobbyChannelIds?.length ? cfg.lobbyChannelIds.map(id => `<#${id}>`).join(', ') : 'Not set'}\n**Matchups channel:** ${cfg.matchupsChannelId ? `<#${cfg.matchupsChannelId}>` : 'Not set'}\n**Staff panel:** ${cfg.staffPanelChannelId ? `<#${cfg.staffPanelChannelId}>` : 'Not set'}`);
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('setup:sm:start').setLabel('▶️ Start').setStyle(ButtonStyle.Success).setDisabled(running),
+    new ButtonBuilder().setCustomId('setup:sm:bell').setLabel('🔔 Next Round').setStyle(ButtonStyle.Primary).setDisabled(!running),
+    new ButtonBuilder().setCustomId('setup:sm:stop').setLabel('⏹ End Session').setStyle(ButtonStyle.Danger).setDisabled(!running),
+    new ButtonBuilder().setCustomId('setup:sm:setinterval').setLabel('⏱ Set Interval').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup:main').setLabel('⬅ Back').setStyle(ButtonStyle.Secondary),
+  );
+  const lobbySelect = new ChannelSelectMenuBuilder().setCustomId('setup:sm:lobby:select').setPlaceholder('Set lobby voice channel(s)...').setChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice).setMinValues(0).setMaxValues(5);
+  if (cfg.lobbyChannelIds?.length) lobbySelect.setDefaultChannels(...cfg.lobbyChannelIds.slice(0, 5));
+  const matchupsSelect = new ChannelSelectMenuBuilder().setCustomId('setup:sm:matchups:select').setPlaceholder('Set matchups/announcements text channel...').setChannelTypes(ChannelType.GuildText).setMinValues(0).setMaxValues(1);
+  if (cfg.matchupsChannelId) matchupsSelect.setDefaultChannels(cfg.matchupsChannelId);
+  const staffSelect = new ChannelSelectMenuBuilder().setCustomId('setup:sm:staffpanel:select').setPlaceholder('Set staff panel channel (staff only)...').setChannelTypes(ChannelType.GuildText).setMinValues(0).setMaxValues(1);
+  if (cfg.staffPanelChannelId) staffSelect.setDefaultChannels(cfg.staffPanelChannelId);
+  return { embeds: [embed], components: [row1, new ActionRowBuilder().addComponents(lobbySelect), new ActionRowBuilder().addComponents(matchupsSelect), new ActionRowBuilder().addComponents(staffSelect)] };
+}
+
+function buildTempRolesSetupMessage(guildId) {
+  const cfg = loadTR()[guildId] || {};
+  const embed = new EmbedBuilder().setColor(0x2b2d31).setTitle('🎭 Temp Roles — Setup')
+    .setDescription(`**VC Role:** ${cfg.vcRoleId ? `<@&${cfg.vcRoleId}>` : 'Not set'}\n**Announce Channel:** ${cfg.announceChannelId ? `<#${cfg.announceChannelId}>` : 'Not set'}\n**VC Text Channel:** ${cfg.vcTextChannelId ? `<#${cfg.vcTextChannelId}>` : 'Not set'}\n**Timed Roles:** ${cfg.timedRoles?.length ? cfg.timedRoles.map(r => `<@&${r.roleId}> (${r.durationMinutes}m)`).join(', ') : 'None'}\n\n> VC Role is applied on join/removed on leave. Timed roles are given via button click and expire automatically.`);
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('setup:tr:vcconfig').setLabel('🔊 VC Role Config').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup:tr:addtimed').setLabel('⏱ Add Timed Role').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup:tr:postbutton').setLabel('📤 Post Button').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup:main').setLabel('⬅ Back').setStyle(ButtonStyle.Secondary),
+  );
+  return { embeds: [embed], components: [row] };
+}
+
+function buildStickyARSetupMessage(guildId, mode) {
+  const isAR = mode === 'autorespond';
+  const embed = new EmbedBuilder().setColor(0x2b2d31).setTitle(isAR ? '🤖 Auto Responder — Setup' : '📌 Sticky Notes — Setup')
+    .setDescription((isAR ? 'Auto responders reply when a trigger is detected in any message.' : 'Sticky notes re-post at the bottom of a channel whenever someone sends a message.') + '\n\n> Manage all entries from the Dashboard at **high-speed-connection.fly.dev**');
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(isAR ? 'setup:ar:add' : 'setup:sticky:add').setLabel(isAR ? '➕ Add Auto Responder' : '➕ Add Sticky Note').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('setup:main').setLabel('⬅ Back').setStyle(ButtonStyle.Secondary),
+  );
+  return { embeds: [embed], components: [row] };
+}
 
 // ===========================================================================
 //  HSC BUTTON HANDLER (Match Again / Skip + Staff Panel)
@@ -1756,61 +1940,152 @@ app.get('/', async (req, res) => {
 });
 
 // ── camera policy ─────────────────────────────────────────────────────────
+// ── camera policy ─────────────────────────────────────────────────────────
 app.get('/camera', (req, res) => {
   const guildId = resolveGuildId(req);
   const allowedGuildIds = req.session.allowedGuildIds || [];
   if (!guildId) return res.redirect('/');
   const cfg = loadCameraConfig()[guildId] || {};
   const guild = client.guilds.cache.get(guildId);
-  const channels = guild ? [...guild.channels.cache.values()].filter(c => c.type === ChannelType.GuildVoice) : [];
-  const roles = guild ? [...guild.roles.cache.values()].filter(r => r.id !== guild.id) : [];
-  const flash = req.query.flash ? `<div class="flash flash-ok">${decodeURIComponent(req.query.flash)}</div>` : '';
-  const monitored = cfg.monitoredChannels || [];
-  const exempt = cfg.exemptRoleIds || [];
-  const body = `
+  const voiceChannels = guild ? [...guild.channels.cache.values()].filter(c => c.type === ChannelType.GuildVoice || c.type === ChannelType.GuildStageVoice).sort((a,b) => a.name.localeCompare(b.name)) : [];
+  const categories    = guild ? [...guild.channels.cache.values()].filter(c => c.type === ChannelType.GuildCategory).sort((a,b) => a.name.localeCompare(b.name)) : [];
+  const textChannels  = guild ? [...guild.channels.cache.values()].filter(c => c.type === ChannelType.GuildText).sort((a,b) => a.name.localeCompare(b.name)) : [];
+  const roles         = guild ? [...guild.roles.cache.values()].filter(r => r.id !== guild.id).sort((a,b) => b.position - a.position) : [];
+  const flash = req.query.flash ? `<div class="flash ${req.query.flash.includes('❌')?'flash-err':'flash-ok'}">${decodeURIComponent(req.query.flash)}</div>` : '';
+  const monitored    = cfg.monitoredChannels || [];
+  const monitoredCats = cfg.monitoredCategoryIds || [];
+  const exempt       = cfg.exemptRoles || cfg.exemptRoleIds || [];
+
+  const searchScript = `<script>
+    function flist(inp,listId){const v=inp.value.toLowerCase();document.querySelectorAll('#'+listId+' label').forEach(l=>{l.style.display=l.textContent.toLowerCase().includes(v)?'':'none';});}
+  </script>`;
+  const optList = (id, items, checked, nameOf) => `
+    <input type="text" placeholder="Search..." oninput="flist(this,'${id}')" style="margin-bottom:.4rem;">
+    <div id="${id}" style="max-height:190px;overflow-y:auto;border:1px solid var(--border);border-radius:4px;background:var(--surface2);">
+      ${items.map(i => `<label style="display:flex;align-items:center;gap:.6rem;padding:.35rem .75rem;font-size:.84rem;cursor:pointer;transition:background .15s;" onmouseover="this.style.background='var(--magenta-faint)'" onmouseout="this.style.background=''">
+        <input type="checkbox" name="${id.split('-')[0]}" value="${i.id}" ${checked.includes(i.id)?'checked':''}> ${nameOf(i)}
+      </label>`).join('')}
+    </div>`;
+
+  const body = `${searchScript}
     <div class="page-title">CAMERA POLICY</div>
-    <div class="page-sub">Enforce camera-on rules in voice channels.</div>
+    <div class="page-sub">Enforce camera-on rules in voice channels. Each section saves independently.</div>
     ${flash}
-    <form method="POST" action="/camera/save?guild=${guildId}">
+
+    <form method="POST" action="/camera/save/status?guild=${guildId}">
       <div class="card">
         <div class="card-title">Status</div>
-        <div class="toggle"><input type="checkbox" id="enabled" name="enabled" ${cfg.enabled ? 'checked' : ''}><label for="enabled">Camera policy enabled</label></div>
+        <div class="toggle"><input type="checkbox" id="enabled" name="enabled" ${cfg.enabled?'checked':''}><label for="enabled">Camera policy enabled</label></div>
+        <div style="margin-top:1rem;"><button type="submit" class="btn btn-primary">💾 Save Status</button></div>
       </div>
+    </form>
+
+    <form method="POST" action="/camera/save/timing?guild=${guildId}">
       <div class="card">
         <div class="card-title">Timing</div>
-        <div class="form-row"><label>Grace period (minutes)</label><input type="number" name="graceMinutes" value="${cfg.graceMinutes ?? 2}" min="0" max="60"></div>
-        <div class="form-row"><label>Warning period (minutes)</label><input type="number" name="warningMinutes" value="${cfg.warningMinutes ?? 3}" min="0" max="60"></div>
+        <div class="form-row"><label>Grace period (minutes) — silent, no message</label><input type="number" name="graceMinutes" value="${cfg.graceMinutes??2}" min="0" max="60"></div>
+        <div class="form-row"><label>Warning period (minutes) — after reminder is sent</label><input type="number" name="warningMinutes" value="${cfg.warningMinutes??3}" min="1" max="60"></div>
+        <button type="submit" class="btn btn-primary">💾 Save Timing</button>
       </div>
+    </form>
+
+    <form method="POST" action="/camera/save/announcement?guild=${guildId}">
       <div class="card">
-        <div class="card-title">Monitored Voice Channels</div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:.5rem;">
-          ${channels.map(c => `<label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer;"><input type="checkbox" name="monitoredChannels" value="${c.id}" ${monitored.includes(c.id) ? 'checked' : ''}> ${c.name}</label>`).join('')}
+        <div class="card-title">Announcement</div>
+        <div class="form-row"><label>Announcement channel — where policy reminders are posted</label>
+          <select name="announcementChannelId">
+            <option value="">— no channel —</option>
+            ${textChannels.map(c=>`<option value="${c.id}" ${cfg.announcementChannelId===c.id?'selected':''}>#${c.name}</option>`).join('')}
+          </select>
         </div>
+        <div class="form-row"><label>Announcement post URL — link to your camera policy post (optional)</label>
+          <input type="text" name="announcementUrl" value="${cfg.announcementUrl||''}" placeholder="https://discord.com/channels/...">
+        </div>
+        <button type="submit" class="btn btn-primary">💾 Save Announcement</button>
       </div>
+    </form>
+
+    <form method="POST" action="/camera/save/channels?guild=${guildId}">
+      <div class="card">
+        <div class="card-title">Monitored Voice Channels &amp; Categories</div>
+        <p style="font-size:.78rem;color:var(--muted);padding:.5rem .75rem;background:var(--magenta-faint);border-left:2px solid var(--magenta);border-radius:0 4px 4px 0;margin-bottom:1rem;">
+          💡 You can select individual channels, entire categories, or both. Category selection monitors all voice channels inside it.
+        </p>
+        <div class="form-row"><label>Voice Channels</label>
+          ${optList('monitoredChannels-vc', voiceChannels, monitored, c => `🔊 ${c.name}${c.parent?' <span style="opacity:.5;font-size:.75rem;">('+c.parent.name+')</span>':''}`)}
+        </div>
+        <div class="form-row"><label>Categories — monitors all voice channels inside</label>
+          ${optList('monitoredCategoryIds-cat', categories, monitoredCats, c => `📁 ${c.name}`)}
+        </div>
+        <button type="submit" class="btn btn-primary">💾 Save Monitored Channels</button>
+      </div>
+    </form>
+
+    <form method="POST" action="/camera/save/roles?guild=${guildId}">
       <div class="card">
         <div class="card-title">Exempt Roles</div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:.5rem;">
-          ${roles.map(r => `<label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer;"><input type="checkbox" name="exemptRoles" value="${r.id}" ${exempt.includes(r.id) ? 'checked' : ''}> ${r.name}</label>`).join('')}
+        <p style="font-size:.78rem;color:var(--muted);margin-bottom:.75rem;">Members with these roles skip camera enforcement.</p>
+        <div class="form-row">
+          ${optList('exemptRoles-roles', roles, exempt, r => `@${r.name}`)}
         </div>
+        <button type="submit" class="btn btn-primary">💾 Save Exempt Roles</button>
       </div>
-      <button type="submit" class="btn btn-primary">💾 Save Changes</button>
     </form>`;
-  res.send(renderLayout({ title: 'Camera Policy', guildId, currentPath: '/camera', allowedGuildIds, username: req.session.userTag, body }));
+  res.send(renderLayout({ title:'Camera Policy', guildId, currentPath:'/camera', allowedGuildIds, username:req.session.userTag, body }));
 });
 
-app.post('/camera/save', (req, res) => {
-  const guildId = resolveGuildId(req);
-  if (!guildId) return res.redirect('/');
-  const cfg = loadCameraConfig();
-  if (!cfg[guildId]) cfg[guildId] = {};
+app.post('/camera/save/status', (req, res) => {
+  const guildId = resolveGuildId(req); if (!guildId) return res.redirect('/');
+  const cfg = loadCameraConfig(); if (!cfg[guildId]) cfg[guildId] = {};
   cfg[guildId].enabled = req.body.enabled === 'on';
-  cfg[guildId].graceMinutes = parseInt(req.body.graceMinutes) || 2;
-  cfg[guildId].warningMinutes = parseInt(req.body.warningMinutes) || 3;
-  const mc = req.body.monitoredChannels;
-  cfg[guildId].monitoredChannels = mc ? (Array.isArray(mc) ? mc : [mc]) : [];
-  const er = req.body.exemptRoles;
-  cfg[guildId].exemptRoleIds = er ? (Array.isArray(er) ? er : [er]) : [];
-  saveCameraConfig(cfg);
+  saveCameraConfig(cfg); cameraConfig = cfg;
+  res.redirect(`/camera?guild=${guildId}&flash=${encodeURIComponent('✅ Status saved.')}`);
+});
+app.post('/camera/save/timing', (req, res) => {
+  const guildId = resolveGuildId(req); if (!guildId) return res.redirect('/');
+  const cfg = loadCameraConfig(); if (!cfg[guildId]) cfg[guildId] = {};
+  cfg[guildId].graceMinutes = parseInt(req.body.graceMinutes)||2;
+  cfg[guildId].warningMinutes = parseInt(req.body.warningMinutes)||3;
+  saveCameraConfig(cfg); cameraConfig = cfg;
+  res.redirect(`/camera?guild=${guildId}&flash=${encodeURIComponent('✅ Timing saved.')}`);
+});
+app.post('/camera/save/announcement', (req, res) => {
+  const guildId = resolveGuildId(req); if (!guildId) return res.redirect('/');
+  const cfg = loadCameraConfig(); if (!cfg[guildId]) cfg[guildId] = {};
+  cfg[guildId].announcementChannelId = req.body.announcementChannelId || null;
+  cfg[guildId].announcementUrl = req.body.announcementUrl?.trim() || null;
+  saveCameraConfig(cfg); cameraConfig = cfg;
+  res.redirect(`/camera?guild=${guildId}&flash=${encodeURIComponent('✅ Announcement saved.')}`);
+});
+app.post('/camera/save/channels', (req, res) => {
+  const guildId = resolveGuildId(req); if (!guildId) return res.redirect('/');
+  const cfg = loadCameraConfig(); if (!cfg[guildId]) cfg[guildId] = {};
+  const mc = req.body['monitoredChannels-vc'] || req.body.monitoredChannels;
+  const mcat = req.body['monitoredCategoryIds-cat'] || req.body.monitoredCategoryIds;
+  cfg[guildId].monitoredChannels   = mc   ? (Array.isArray(mc)   ? mc   : [mc])   : [];
+  cfg[guildId].monitoredCategoryIds = mcat ? (Array.isArray(mcat) ? mcat : [mcat]) : [];
+  saveCameraConfig(cfg); cameraConfig = cfg;
+  res.redirect(`/camera?guild=${guildId}&flash=${encodeURIComponent('✅ Monitored channels saved.')}`);
+});
+app.post('/camera/save/roles', (req, res) => {
+  const guildId = resolveGuildId(req); if (!guildId) return res.redirect('/');
+  const cfg = loadCameraConfig(); if (!cfg[guildId]) cfg[guildId] = {};
+  const er = req.body['exemptRoles-roles'] || req.body.exemptRoles;
+  cfg[guildId].exemptRoles   = er ? (Array.isArray(er) ? er : [er]) : [];
+  cfg[guildId].exemptRoleIds = cfg[guildId].exemptRoles;
+  saveCameraConfig(cfg); cameraConfig = cfg;
+  res.redirect(`/camera?guild=${guildId}&flash=${encodeURIComponent('✅ Exempt roles saved.')}`);
+});
+app.post('/camera/save', (req, res) => { // legacy compat
+  const guildId = resolveGuildId(req); if (!guildId) return res.redirect('/');
+  const cfg = loadCameraConfig(); if (!cfg[guildId]) cfg[guildId] = {};
+  cfg[guildId].enabled = req.body.enabled === 'on';
+  cfg[guildId].graceMinutes = parseInt(req.body.graceMinutes)||2;
+  cfg[guildId].warningMinutes = parseInt(req.body.warningMinutes)||3;
+  const mc = req.body.monitoredChannels; cfg[guildId].monitoredChannels = mc?(Array.isArray(mc)?mc:[mc]):[];
+  const er = req.body.exemptRoles; cfg[guildId].exemptRoles = er?(Array.isArray(er)?er:[er]):[];
+  cfg[guildId].exemptRoleIds = cfg[guildId].exemptRoles;
+  saveCameraConfig(cfg); cameraConfig = cfg;
   res.redirect(`/camera?guild=${guildId}&flash=${encodeURIComponent('✅ Camera policy saved.')}`);
 });
 
@@ -1819,29 +2094,116 @@ app.get('/channel-index', (req, res) => {
   const guildId = resolveGuildId(req);
   const allowedGuildIds = req.session.allowedGuildIds || [];
   if (!guildId) return res.redirect('/');
-  const flash = req.query.flash ? `<div class="flash flash-ok">${decodeURIComponent(req.query.flash)}</div>` : '';
+  const flash = req.query.flash ? `<div class="flash ${req.query.flash.includes('❌')?'flash-err':'flash-ok'}">${decodeURIComponent(req.query.flash)}</div>` : '';
+  const guild = client.guilds.cache.get(guildId);
+  const indexCfg = ensureChannelIndexGuildConfig(guildId);
+  const descriptions = loadDescriptions(guildId);
+  const textChannels = guild ? [...guild.channels.cache.values()].filter(c => c.type === ChannelType.GuildText).sort((a,b) => a.name.localeCompare(b.name)) : [];
+  const allChannels  = guild ? [...guild.channels.cache.values()].filter(c => c.type !== ChannelType.GuildCategory).sort((a,b) => a.rawPosition - b.rawPosition) : [];
+
+  const byCategory = {};
+  for (const ch of allChannels) {
+    const cat = ch.parent?.name || 'No Category';
+    if (!byCategory[cat]) byCategory[cat] = [];
+    byCategory[cat].push(ch);
+  }
+
+  const channelRows = Object.entries(byCategory).map(([cat, chs]) => {
+    const rows = chs.map(ch => {
+      const excluded = indexCfg.excludedChannelIds?.includes(ch.id);
+      const desc = descriptions[ch.id]?.description || '';
+      const icon = ch.type === ChannelType.GuildVoice ? '🔊' : ch.type === ChannelType.GuildForum ? '📋' : '#';
+      return `<tr>
+        <td style="width:32px;text-align:center;"><input type="checkbox" name="includedChannels" value="${ch.id}" ${!excluded?'checked':''} title="${excluded?'Excluded':'Included'}"></td>
+        <td style="white-space:nowrap">${icon} ${ch.name}</td>
+        <td><input type="text" name="desc_${ch.id}" value="${desc.replace(/"/g,'&quot;')}" placeholder="Channel description..." style="padding:.3rem .5rem;font-size:.82rem;"></td>
+      </tr>`;
+    }).join('');
+    return `<tr><td colspan="3" style="background:var(--surface2);padding:.35rem .75rem;font-size:.7rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--border);">📁 ${cat}</td></tr>${rows}`;
+  }).join('');
+
   const body = `
     <div class="page-title">CHANNEL INDEX</div>
-    <div class="page-sub">Post a formatted channel index embed to Discord.</div>
+    <div class="page-sub">Post a formatted clickable channel index. Edit descriptions and choose which channels to include.</div>
     ${flash}
-    <div class="card">
-      <div class="card-title">Actions</div>
-      <form method="POST" action="/channel-index/post?guild=${guildId}" style="display:flex;gap:.75rem;flex-wrap:wrap;">
+    <form method="POST" action="/channel-index/post?guild=${guildId}">
+      <div class="card">
+        <div class="card-title">Post Channel Index</div>
+        <div class="form-row"><label>Post to channel</label>
+          <select name="targetChannelId">
+            <option value="">— select a channel —</option>
+            ${textChannels.map(c=>`<option value="${c.id}">#${c.name}</option>`).join('')}
+          </select>
+        </div>
         <button type="submit" class="btn btn-primary">📋 Post Channel Index</button>
-      </form>
-    </div>`;
-  res.send(renderLayout({ title: 'Channel Index', guildId, currentPath: '/channel-index', allowedGuildIds, username: req.session.userTag, body }));
+      </div>
+    </form>
+    <form method="POST" action="/channel-index/save-descriptions?guild=${guildId}">
+      <div class="card">
+        <div class="card-title">Channels &amp; Descriptions</div>
+        <p style="font-size:.8rem;color:var(--muted);margin-bottom:1rem;">✓ = included in index. Add descriptions to appear alongside channel links.</p>
+        <table>
+          <thead><tr><th style="width:32px;text-align:center;">✓</th><th>Channel</th><th>Description</th></tr></thead>
+          <tbody>${channelRows}</tbody>
+        </table>
+        <div style="margin-top:1rem;"><button type="submit" class="btn btn-primary">💾 Save Descriptions &amp; Visibility</button></div>
+      </div>
+    </form>`;
+  res.send(renderLayout({ title:'Channel Index', guildId, currentPath:'/channel-index', allowedGuildIds, username:req.session.userTag, body }));
+});
+
+app.post('/channel-index/save-descriptions', (req, res) => {
+  const guildId = resolveGuildId(req); if (!guildId) return res.redirect('/');
+  const guild = client.guilds.cache.get(guildId);
+  const allChannels = guild ? [...guild.channels.cache.values()].filter(c => c.type !== ChannelType.GuildCategory) : [];
+  const all = loadAllDescriptions(); if (!all[guildId]) all[guildId] = {};
+  for (const ch of allChannels) {
+    const desc = req.body[`desc_${ch.id}`] || '';
+    all[guildId][ch.id] = { name: ch.name, description: desc.trim() };
+  }
+  saveAllDescriptions(all);
+  const included = (() => { const v = req.body.includedChannels; return v ? (Array.isArray(v)?v:[v]) : []; })();
+  const excluded = allChannels.map(c=>c.id).filter(id=>!included.includes(id));
+  ensureChannelIndexGuildConfig(guildId).excludedChannelIds = excluded;
+  saveChannelIndexConfig(channelIndexConfig);
+  res.redirect(`/channel-index?guild=${guildId}&flash=${encodeURIComponent('✅ Descriptions and visibility saved.')}`);
 });
 
 app.post('/channel-index/post', async (req, res) => {
-  const guildId = resolveGuildId(req);
-  if (!guildId) return res.redirect('/');
+  const guildId = resolveGuildId(req); if (!guildId) return res.redirect('/');
+  const targetChannelId = req.body.targetChannelId;
+  if (!targetChannelId) return res.redirect(`/channel-index?guild=${guildId}&flash=${encodeURIComponent('❌ Select a channel to post to.')}`);
   try {
-    const guild = await client.guilds.fetch(guildId);
-    await exportToFile(guild);
-    res.redirect(`/channel-index?guild=${guildId}&flash=${encodeURIComponent('✅ Channel index posted.')}`);
+    const guild = await client.guilds.fetch(guildId); await guild.channels.fetch();
+    const targetCh = guild.channels.cache.get(targetChannelId);
+    if (!targetCh) return res.redirect(`/channel-index?guild=${guildId}&flash=${encodeURIComponent('❌ Channel not found.')}`);
+    const data = getChannelData(guild);
+    const indexCfg = ensureChannelIndexGuildConfig(guildId);
+    const descriptions = loadDescriptions(guildId);
+    const byCategory = {};
+    for (const ch of data) {
+      if (indexCfg.excludedCategoryIds?.includes(ch.categoryId)) continue;
+      if (indexCfg.excludedChannelIds?.includes(ch.id)) continue;
+      if (indexCfg.excludedNameKeywords?.some(kw => ch.name.toLowerCase().includes(kw))) continue;
+      const key = ch.category || 'No Category';
+      if (!byCategory[key]) byCategory[key] = [];
+      byCategory[key].push(ch);
+    }
+    const MAX_FIELDS = 25, MAX_CHARS = 5500;
+    const embeds = []; let current = null; let fc = 0; let cc = 0; let first = true;
+    const newEmbed = () => { const e = new EmbedBuilder().setColor(0x8a2be2); if (first) { e.setTitle('Channel Index').setTimestamp(); first = false; } return e; };
+    current = newEmbed();
+    for (const [cat, chs] of Object.entries(byCategory)) {
+      const lines = chs.map(ch => { const d = descriptions[ch.id]?.description?.trim(); return `[${d?`**#${ch.name}** — ${d}`:`**#${ch.name}**`}](${ch.link})`; });
+      const value = lines.join('\n').slice(0,1024) || '—';
+      if (fc >= MAX_FIELDS || cc + cat.length + value.length > MAX_CHARS) { embeds.push(current); current = newEmbed(); fc = 0; cc = 0; }
+      current.addFields({ name: cat, value }); fc++; cc += cat.length + value.length;
+    }
+    embeds.push(current);
+    for (const e of embeds) await targetCh.send({ embeds: [e] });
+    res.redirect(`/channel-index?guild=${guildId}&flash=${encodeURIComponent('✅ Channel index posted to #'+targetCh.name)}`);
   } catch (err) {
-    res.redirect(`/channel-index?guild=${guildId}&flash=${encodeURIComponent('❌ Error: ' + err.message)}`);
+    res.redirect(`/channel-index?guild=${guildId}&flash=${encodeURIComponent('❌ Error: '+err.message)}`);
   }
 });
 
@@ -1850,32 +2212,144 @@ app.get('/speed-match', (req, res) => {
   const guildId = resolveGuildId(req);
   const allowedGuildIds = req.session.allowedGuildIds || [];
   if (!guildId) return res.redirect('/');
-  const cfg = (loadVcShuffleConfig()[guildId]) || {};
-  const flash = req.query.flash ? `<div class="flash flash-ok">${decodeURIComponent(req.query.flash)}</div>` : '';
+  const cfg = ensureVcShuffleGuildConfig(guildId);
+  const guild = client.guilds.cache.get(guildId);
+  const state = shuffleState.get(guildId);
+  const flash = req.query.flash ? `<div class="flash ${req.query.flash.includes('❌')?'flash-err':'flash-ok'}">${decodeURIComponent(req.query.flash)}</div>` : '';
+  const running = cfg.enabled;
+  const modeLabel = cfg.connectionMode==='role-based' ? 'Role-Based' : (cfg.minGroupSize===1 ? '1-on-1' : `${cfg.minGroupSize}v${cfg.minGroupSize}`);
+  const nextAt = state?.nextShuffleAt ? new Date(state.nextShuffleAt).toLocaleTimeString() : '—';
+  const textChannels  = guild ? [...guild.channels.cache.values()].filter(c=>c.type===ChannelType.GuildText).sort((a,b)=>a.name.localeCompare(b.name)) : [];
+  const voiceChannels = guild ? [...guild.channels.cache.values()].filter(c=>c.type===ChannelType.GuildVoice||c.type===ChannelType.GuildStageVoice).sort((a,b)=>a.name.localeCompare(b.name)) : [];
+  const categories    = guild ? [...guild.channels.cache.values()].filter(c=>c.type===ChannelType.GuildCategory).sort((a,b)=>a.rawPosition-b.rawPosition) : [];
+
+  let eventCatSection = '';
+  if (cfg.eventCategoryId) {
+    const subChs = guild ? [...guild.channels.cache.values()].filter(c=>c.parentId===cfg.eventCategoryId).sort((a,b)=>a.rawPosition-b.rawPosition) : [];
+    const cat = guild?.channels.cache.get(cfg.eventCategoryId);
+    eventCatSection = `<div class="card"><div class="card-title">Event Category — ${cat?.name||cfg.eventCategoryId}</div>
+      <table><thead><tr><th>Channel</th><th>Type</th></tr></thead><tbody>
+        ${subChs.map(c=>`<tr><td>${c.type===ChannelType.GuildVoice?'🔊':'#'} ${c.name}</td><td style="color:var(--muted);font-size:.8rem;">${c.type===ChannelType.GuildVoice?'voice':'text'}</td></tr>`).join('')||'<tr><td colspan="2" style="color:var(--muted)">No channels yet.</td></tr>'}
+      </tbody></table>
+      ${!subChs.length?`<form method="POST" action="/speed-match/create-channels?guild=${guildId}" style="margin-top:1rem;"><button type="submit" class="btn btn-primary">➕ Create Standard Event Channels</button></form>`:''}
+    </div>`;
+  }
+
+  const cloudRoomRows = (cfg.cloudRoomIds||[]).map(id=>{
+    const ch=guild?.channels.cache.get(id);
+    return `<tr><td>🔊 ${ch?.name||id}</td><td style="color:var(--muted);font-size:.8rem;">${id}</td><td><form method="POST" action="/speed-match/cloudroom/remove?guild=${guildId}" style="display:inline"><input type="hidden" name="roomId" value="${id}"><button type="submit" class="btn btn-danger" style="padding:.2rem .5rem;font-size:.75rem;">Remove</button></form></td></tr>`;
+  }).join('');
+
+  const statCard = (icon,label,val) => `<div class="card" style="text-align:center;padding:1rem;"><div style="font-size:1.75rem;margin-bottom:.2rem;">${icon}</div><div style="font-size:.65rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);">${label}</div><div style="font-size:1rem;font-weight:600;margin-top:.2rem;">${val}</div></div>`;
+
   const body = `
     <div class="page-title">SPEED MATCH</div>
-    <div class="page-sub">Manage speed matching events. Use Discord slash commands to start/stop.</div>
+    <div class="page-sub">HIGH-SPEED CONNECTION — speed matching event management.</div>
     ${flash}
-    <div class="card">
-      <div class="card-title">Current Status</div>
-      <table>
-        <tr><td>Session</td><td><span class="status-dot ${cfg.running ? 'status-on' : 'status-off'}"></span>${cfg.running ? 'Running' : 'Idle'}</td></tr>
-        <tr><td>Connection Mode</td><td>${cfg.connectionMode || 'standard'}</td></tr>
-        <tr><td>Round Duration</td><td>${cfg.roundMinutes || 5} minutes</td></tr>
-        <tr><td>Cloud Rooms</td><td>${cfg.cloudRoomIds?.length || 0} configured</td></tr>
-      </table>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:1rem;margin-bottom:1.5rem;">
+      ${statCard(running?'🟢':'🔴','Status',running?'Running':'Idle')}
+      ${statCard('🔄','Round','#'+(state?.roundNumber??0))}
+      ${statCard('🤝','Pairs Made',state?.pairHistory?.size??0)}
+      ${statCard('⏱','Next Bell',running?nextAt:'—')}
     </div>
     <div class="card">
-      <div class="card-title">Slash Commands</div>
-      <div style="color:var(--muted);font-size:.85rem;line-height:2;">
-        <code style="color:var(--magenta)">/speed-match start</code> — Start a session<br>
-        <code style="color:var(--magenta)">/speed-match stop</code> — Stop the session<br>
-        <code style="color:var(--magenta)">/speed-match status</code> — Check session status<br>
-        <code style="color:var(--magenta)">/speed-match shuffle-now</code> — Force a shuffle<br>
-        <code style="color:var(--magenta)">/speed-match end-session</code> — End and post summary
+      <div class="card-title">Session Controls</div>
+      <p style="font-size:.8rem;color:var(--muted);margin-bottom:1rem;">Mode: <strong>${modeLabel}</strong> · Interval: <strong>${cfg.minIntervalMinutes}–${cfg.maxIntervalMinutes} min</strong></p>
+      <div style="display:flex;gap:.75rem;flex-wrap:wrap;">
+        <form method="POST" action="/speed-match/start?guild=${guildId}"><button type="submit" class="btn btn-primary" ${running?'disabled':''}>▶️ Start Session</button></form>
+        <form method="POST" action="/speed-match/bell?guild=${guildId}"><button type="submit" class="btn btn-ghost" ${!running?'disabled':''}>🔔 Ring Bell Now</button></form>
+        <form method="POST" action="/speed-match/stop?guild=${guildId}"><button type="submit" class="btn btn-danger" ${!running?'disabled':''}>⏹ End Session</button></form>
       </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Quick Commands</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:.5rem;">
+        ${[['/speed-match start','Start a session'],['/speed-match stop','Stop the session'],['/speed-match status','Check session status'],['/speed-match shuffle-now','Force a shuffle'],['/speed-match end-session','End + post summary'],['/speed-match set-group-size','Set group size'],['/speed-match set-interval','Set round interval'],['/speed-match add-lobby','Add a lobby VC'],['/speed-match set-category','Set event category']].map(([cmd,desc])=>`<div style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:.55rem .8rem;"><code style="color:var(--magenta);font-size:.8rem;">${cmd}</code><div style="color:var(--muted);font-size:.75rem;margin-top:.2rem;">${desc}</div></div>`).join('')}
+      </div>
+    </div>
+    <form method="POST" action="/speed-match/config?guild=${guildId}">
+      <div class="card">
+        <div class="card-title">Configuration</div>
+        <div class="form-row"><label>Lobby voice channel</label>
+          <select name="lobbyChannelId"><option value="">— select lobby —</option>${voiceChannels.map(c=>`<option value="${c.id}" ${cfg.lobbyChannelIds?.includes(c.id)?'selected':''}>🔊 ${c.name}</option>`).join('')}</select>
+        </div>
+        <div class="form-row"><label>Event category (temp rooms created here)</label>
+          <select name="eventCategoryId"><option value="">— select category —</option>${categories.map(c=>`<option value="${c.id}" ${cfg.eventCategoryId===c.id?'selected':''}>📁 ${c.name}</option>`).join('')}</select>
+        </div>
+        <div class="form-row"><label>Matchups / announcements channel</label>
+          <select name="matchupsChannelId"><option value="">— select channel —</option>${textChannels.map(c=>`<option value="${c.id}" ${cfg.matchupsChannelId===c.id?'selected':''}>#${c.name}</option>`).join('')}</select>
+        </div>
+        <div class="form-row"><label>Staff panel channel (staff only)</label>
+          <select name="staffPanelChannelId"><option value="">— select channel —</option>${textChannels.map(c=>`<option value="${c.id}" ${cfg.staffPanelChannelId===c.id?'selected':''}>#${c.name}</option>`).join('')}</select>
+        </div>
+        <div class="form-row"><label>Min round interval (minutes)</label><input type="number" name="minIntervalMinutes" value="${cfg.minIntervalMinutes??3}" min="1" max="60"></div>
+        <div class="form-row"><label>Max round interval (minutes)</label><input type="number" name="maxIntervalMinutes" value="${cfg.maxIntervalMinutes??3}" min="1" max="60"></div>
+        <button type="submit" class="btn btn-primary">💾 Save Configuration</button>
+      </div>
+    </form>
+    ${eventCatSection}
+    ${cloudRoomRows?`<div class="card"><div class="card-title">Cloud Rooms</div><table><thead><tr><th>Channel</th><th>ID</th><th></th></tr></thead><tbody>${cloudRoomRows}</tbody></table></div>`:''}
+    <div class="card">
+      <div class="card-title">Support Server</div>
+      <p style="font-size:.85rem;color:var(--muted);margin-bottom:1rem;">Questions about Speed Match or the bot? Join the support server.</p>
+      <a href="https://discord.gg/kea3NVHJW7" target="_blank" class="btn btn-primary">📨 Join Support Server</a>
     </div>`;
-  res.send(renderLayout({ title: 'Speed Match', guildId, currentPath: '/speed-match', allowedGuildIds, username: req.session.userTag, body }));
+  res.send(renderLayout({ title:'Speed Match', guildId, currentPath:'/speed-match', allowedGuildIds, username:req.session.userTag, body }));
+});
+
+app.post('/speed-match/start', async (req, res) => {
+  const guildId = resolveGuildId(req); if (!guildId) return res.redirect('/');
+  const cfg = ensureVcShuffleGuildConfig(guildId);
+  if (!cfg.lobbyChannelIds?.length) return res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('❌ Add a lobby channel first.')}`);
+  const guild = client.guilds.cache.get(guildId);
+  try { await startVcShuffle(guild, guildId, true); res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('✅ Session started!')}`); }
+  catch (err) { res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('❌ '+err.message)}`); }
+});
+app.post('/speed-match/bell', async (req, res) => {
+  const guildId = resolveGuildId(req); if (!guildId) return res.redirect('/');
+  const guild = client.guilds.cache.get(guildId);
+  try {
+    const state = shuffleState.get(guildId);
+    if (state?.warningTimeoutId) { clearTimeout(state.warningTimeoutId); state.warningTimeoutId = null; }
+    await postBellMessage(guild, guildId); await runShuffleRound(guild, guildId); scheduleNextShuffle(guild, guildId); await refreshStaffPanel(guild, guildId);
+    res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('🔔 Bell rung!')}`);
+  } catch (err) { res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('❌ '+err.message)}`); }
+});
+app.post('/speed-match/stop', async (req, res) => {
+  const guildId = resolveGuildId(req); if (!guildId) return res.redirect('/');
+  try { await stopVcShuffle(client.guilds.cache.get(guildId), guildId); res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('⏹ Session ended.')}`); }
+  catch (err) { res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('❌ '+err.message)}`); }
+});
+app.post('/speed-match/config', (req, res) => {
+  const guildId = resolveGuildId(req); if (!guildId) return res.redirect('/');
+  const cfg = ensureVcShuffleGuildConfig(guildId);
+  if (req.body.lobbyChannelId && !cfg.lobbyChannelIds.includes(req.body.lobbyChannelId)) cfg.lobbyChannelIds.push(req.body.lobbyChannelId);
+  if (req.body.eventCategoryId !== undefined) cfg.eventCategoryId = req.body.eventCategoryId || null;
+  if (req.body.matchupsChannelId !== undefined) cfg.matchupsChannelId = req.body.matchupsChannelId || null;
+  if (req.body.staffPanelChannelId !== undefined) { cfg.staffPanelChannelId = req.body.staffPanelChannelId || null; cfg.staffPanelMessageId = null; }
+  const min = parseInt(req.body.minIntervalMinutes); const max = parseInt(req.body.maxIntervalMinutes);
+  if (!isNaN(min) && min>=1) cfg.minIntervalMinutes = min;
+  if (!isNaN(max) && max>=1) cfg.maxIntervalMinutes = max;
+  saveVcShuffleConfig(vcShuffleConfig);
+  res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('✅ Configuration saved.')}`);
+});
+app.post('/speed-match/cloudroom/remove', (req, res) => {
+  const guildId = resolveGuildId(req); if (!guildId) return res.redirect('/');
+  const cfg = ensureVcShuffleGuildConfig(guildId);
+  cfg.cloudRoomIds = (cfg.cloudRoomIds||[]).filter(id=>id!==req.body.roomId);
+  saveVcShuffleConfig(vcShuffleConfig);
+  res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('✅ Room removed.')}`);
+});
+app.post('/speed-match/create-channels', async (req, res) => {
+  const guildId = resolveGuildId(req); if (!guildId) return res.redirect('/');
+  const cfg = ensureVcShuffleGuildConfig(guildId);
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild || !cfg.eventCategoryId) return res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('❌ Set an event category first.')}`);
+  try {
+    await guild.channels.create({ name:'matchups', type:ChannelType.GuildText, parent:cfg.eventCategoryId });
+    await guild.channels.create({ name:'lobby', type:ChannelType.GuildVoice, parent:cfg.eventCategoryId });
+    res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('✅ Standard event channels created!')}`);
+  } catch (err) { res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('❌ '+err.message)}`); }
 });
 
 // ── sticky posts ───────────────────────────────────────────────────────────
@@ -1883,25 +2357,132 @@ const STICKY_FILE = dataPath('sticky-posts.json');
 function loadSticky() { try { return JSON.parse(fs.readFileSync(STICKY_FILE, 'utf-8')); } catch { return {}; } }
 function saveSticky(d) { fs.writeFileSync(STICKY_FILE, JSON.stringify(d, null, 2)); }
 
-// In-memory: last sticky message per channel
 const stickyLastMsg = {};
-
 client.on('messageCreate', async msg => {
   if (msg.author.bot) return;
-  const sticky = loadSticky();
-  const gSticky = sticky[msg.guildId];
-  if (!gSticky) return;
-  const entry = gSticky[msg.channelId];
-  if (!entry?.content) return;
+  const sticky = loadSticky(); const gSticky = sticky[msg.guildId]; if (!gSticky) return;
+  const entry = gSticky[msg.channelId]; if (!entry?.content) return;
   try {
-    if (stickyLastMsg[msg.channelId]) {
-      const old = await msg.channel.messages.fetch(stickyLastMsg[msg.channelId]).catch(() => null);
-      if (old) await old.delete().catch(() => {});
-    }
-    const sent = await msg.channel.send({ content: `📌 ${entry.content}` });
-    stickyLastMsg[msg.channelId] = sent.id;
+    if (stickyLastMsg[msg.channelId]) { const old = await msg.channel.messages.fetch(stickyLastMsg[msg.channelId]).catch(()=>null); if (old) await old.delete().catch(()=>{}); }
+    const sent = await msg.channel.send({ content:`📌 ${entry.content}` }); stickyLastMsg[msg.channelId] = sent.id;
   } catch {}
 });
+
+// ── EMBED EDITOR helper (shared by sticky + autoresponder) ─────────────────
+const EMBED_EDITOR_SCRIPT = `
+<script>
+// Component editor state
+let __editorComponents = [];
+let __editorIdCtr = 0;
+const __uid = () => 'ec'+(++__editorIdCtr);
+
+function __addComp(type, targetField) {
+  const c = { id: __uid(), type, content:'', url:'' };
+  __editorComponents.push(c);
+  __renderEditor(targetField);
+}
+function __removeComp(id, targetField) {
+  __editorComponents = __editorComponents.filter(c=>c.id!==id);
+  __renderEditor(targetField);
+}
+function __moveComp(id, dir, targetField) {
+  const idx = __editorComponents.findIndex(c=>c.id===id);
+  if (idx<0) return;
+  const to = idx+dir;
+  if (to<0||to>=__editorComponents.length) return;
+  [__editorComponents[idx],__editorComponents[to]]=[__editorComponents[to],__editorComponents[idx]];
+  __renderEditor(targetField);
+}
+function __updateComp(id, key, val, targetField) {
+  const c = __editorComponents.find(x=>x.id===id);
+  if (c) { c[key]=val; __buildOutput(targetField); __renderSidePreview(); }
+}
+function __buildOutput(targetField) {
+  const out = __editorComponents.map(c=>c.type==='text'?c.content:(c.url||'')).filter(Boolean).join('\\n\\n');
+  const f = document.getElementById(targetField);
+  if (f) f.value = out;
+}
+function __renderSidePreview() {
+  const el = document.getElementById('__sidePreview');
+  if (!el) return;
+  if (!__editorComponents.length) { el.innerHTML='<div style="color:#72767d;font-style:italic;font-size:.8rem;">Nothing yet</div>'; return; }
+  el.innerHTML = __editorComponents.map((c,i)=>{
+    if (c.type==='text') return \`<div style="color:#dcddde;font-size:.87rem;white-space:pre-wrap;word-break:break-word;margin-bottom:.5rem;">\${c.content||'<span style="color:#4f545c;font-style:italic;">Empty text</span>'}</div>\`;
+    if (c.type==='image') return c.url?\`<img src="\${c.url}" style="max-width:100%;border-radius:4px;margin-bottom:.5rem;display:block;" onerror="this.outerHTML='<div style=color:#72767d;font-size:.78rem;font-style:italic>⚠️ Image failed to load</div>'">\':<div style="color:#72767d;font-style:italic;font-size:.8rem;margin-bottom:.5rem;">🖼️ Image placeholder</div>\`;
+    return '';
+  }).join('');
+}
+function __renderEditor(targetField) {
+  const el = document.getElementById('__editorCanvas');
+  if (!el) return;
+  if (!__editorComponents.length) {
+    el.innerHTML=\`<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;color:#555;gap:.5rem;padding:2rem;border:2px dashed rgba(255,0,255,.2);border-radius:6px;text-align:center;min-height:120px;"><div style="font-size:1.5rem;">📭</div><div style="font-size:.82rem;">No components — add text or image below.</div></div>\`;
+    __buildOutput(targetField); __renderSidePreview(); return;
+  }
+  el.innerHTML = __editorComponents.map((c,i)=>\`
+    <div style="background:#181818;border:1px solid rgba(255,0,255,.18);border-radius:6px;margin-bottom:.5rem;">
+      <div style="display:flex;align-items:center;gap:.5rem;padding:.4rem .7rem;border-bottom:1px solid rgba(255,0,255,.12);user-select:none;">
+        <span style="color:#555;font-size:.9rem;">⠿⠿</span>
+        <span style="font-size:.7rem;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:#FF00FF;">\${c.type==='text'?'✏️ Text':'🖼️ Image'}</span>
+        <div style="margin-left:auto;display:flex;gap:.3rem;">
+          <button type="button" onclick="__moveComp('\${c.id}',-1,'\${targetField}')" style="background:transparent;border:1px solid rgba(255,0,255,.2);color:#e0e0e0;border-radius:3px;padding:.15rem .4rem;font-size:.7rem;cursor:pointer;" \${i===0?'disabled':''}>▲</button>
+          <button type="button" onclick="__moveComp('\${c.id}',1,'\${targetField}')" style="background:transparent;border:1px solid rgba(255,0,255,.2);color:#e0e0e0;border-radius:3px;padding:.15rem .4rem;font-size:.7rem;cursor:pointer;" \${i===__editorComponents.length-1?'disabled':''}>▼</button>
+          <button type="button" onclick="__removeComp('\${c.id}','\${targetField}')" style="background:#c0392b;border:none;color:#fff;border-radius:3px;padding:.15rem .4rem;font-size:.7rem;cursor:pointer;">🗑</button>
+        </div>
+      </div>
+      <div style="padding:.7rem;">
+        \${c.type==='text'?\`
+          <textarea rows="3" maxlength="4000" oninput="__updateComp('\${c.id}','content',this.value,'\${targetField}')" placeholder="Content of the text component." style="width:100%;background:#111;border:1px solid rgba(255,0,255,.18);color:#e0e0e0;padding:.4rem .6rem;border-radius:4px;font-size:.84rem;font-family:inherit;resize:vertical;">\${c.content}</textarea>
+          <div style="font-size:.68rem;color:#555;text-align:right;">\${c.content.length}/4000</div>
+        \`:\`
+          <input type="text" value="\${c.url}" oninput="__updateComp('\${c.id}','url',this.value,'\${targetField}');__refreshImg('__img_\${c.id}',this.value)" placeholder="https://example.com/image.png" style="width:100%;background:#111;border:1px solid rgba(255,0,255,.18);color:#e0e0e0;padding:.4rem .6rem;border-radius:4px;font-size:.84rem;font-family:inherit;margin-bottom:.5rem;">
+          <div id="__img_\${c.id}" style="background:#111;border-radius:4px;overflow:hidden;border:1px solid rgba(255,0,255,.12);display:flex;align-items:center;justify-content:center;min-height:60px;">
+            \${c.url?\`<img src="\${c.url}" style="max-width:100%;max-height:160px;object-fit:contain;" onerror="this.parentElement.innerHTML='<div style=color:#555;font-size:.8rem;padding:.75rem;>⚠️ Image failed to load</div>'">\`:'<div style="color:#555;font-size:.8rem;padding:.75rem;">🖼️ Add Media — paste an image URL above</div>'}
+          </div>
+        \`}
+      </div>
+    </div>
+  \`).join('');
+  __buildOutput(targetField); __renderSidePreview();
+}
+function __refreshImg(elId, url) {
+  const el = document.getElementById(elId); if (!el) return;
+  if (!url) { el.innerHTML='<div style="color:#555;font-size:.8rem;padding:.75rem;">🖼️ Add Media — paste an image URL above</div>'; return; }
+  el.innerHTML=\`<img src="\${url}" style="max-width:100%;max-height:160px;object-fit:contain;" onerror="this.parentElement.innerHTML='<div style=color:#555;font-size:.8rem;padding:.75rem;>⚠️ Image failed to load</div>'">\`;
+}
+function __initEditor(targetField, existingContent) {
+  __editorComponents = [];
+  if (existingContent) {
+    existingContent.split(/\\n\\n+/).forEach(part => {
+      part = part.trim(); if (!part) return;
+      if (part.match(/^https?:\\/\\/.+\\.(png|jpg|jpeg|gif|webp)(\\?.*)?$/i)) __editorComponents.push({ id:__uid(), type:'image', url:part, content:'' });
+      else __editorComponents.push({ id:__uid(), type:'text', content:part, url:'' });
+    });
+  }
+  __renderEditor(targetField);
+}
+</script>`;
+
+function embedEditorHTML(targetFieldId, existingContent = '', label = 'Message') {
+  const escaped = (existingContent||'').replace(/\\/g,'\\\\').replace(/`/g,'\\`');
+  return `
+    <div style="display:flex;gap:1rem;margin-top:.5rem;">
+      <div style="flex:1;min-width:0;">
+        <div style="display:flex;gap:.4rem;margin-bottom:.5rem;flex-wrap:wrap;">
+          <button type="button" class="btn btn-ghost" style="font-size:.78rem;padding:.3rem .7rem;" onclick="__addComp('text','${targetFieldId}')">✏️ Add Text</button>
+          <button type="button" class="btn btn-ghost" style="font-size:.78rem;padding:.3rem .7rem;" onclick="__addComp('image','${targetFieldId}')">🖼️ Add Image</button>
+        </div>
+        <div id="__editorCanvas"></div>
+      </div>
+      <div style="width:220px;flex-shrink:0;">
+        <div style="font-size:.62rem;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--magenta);margin-bottom:.4rem;">Discord Preview</div>
+        <div id="__sidePreview" style="background:#36393f;border-radius:6px;padding:.75rem 1rem;border:1px solid rgba(255,255,255,.06);min-height:60px;">
+          <div style="color:#72767d;font-style:italic;font-size:.8rem;">Nothing yet</div>
+        </div>
+      </div>
+    </div>
+    <script>document.addEventListener('DOMContentLoaded',()=>__initEditor('${targetFieldId}',\`${escaped}\`));</script>`;
+}
 
 app.get('/sticky', (req, res) => {
   const guildId = resolveGuildId(req);
@@ -1910,59 +2491,77 @@ app.get('/sticky', (req, res) => {
   const guild = client.guilds.cache.get(guildId);
   const sticky = loadSticky();
   const gSticky = sticky[guildId] || {};
-  const flash = req.query.flash ? `<div class="flash flash-ok">${decodeURIComponent(req.query.flash)}</div>` : '';
-  const channels = guild ? [...guild.channels.cache.values()].filter(c =>
-    c.type === ChannelType.GuildText || c.type === ChannelType.GuildVoice ||
-    c.type === ChannelType.PublicThread || c.type === ChannelType.GuildForum
-  ).sort((a,b) => a.name.localeCompare(b.name)) : [];
+  const flash = req.query.flash ? `<div class="flash ${req.query.flash.includes('❌')?'flash-err':'flash-ok'}">${decodeURIComponent(req.query.flash)}</div>` : '';
+  const editChannelId = req.query.edit || null;
+  const channels = guild ? [...guild.channels.cache.values()].filter(c=>c.type===ChannelType.GuildText||c.type===ChannelType.GuildVoice||c.type===ChannelType.PublicThread||c.type===ChannelType.GuildForum).sort((a,b)=>a.name.localeCompare(b.name)) : [];
+
+  const chanSearch = `<input type="text" placeholder="Search channels (#)..." oninput="this.nextElementSibling.querySelectorAll('option').forEach(o=>{o.hidden=o.value&&!o.text.toLowerCase().includes(this.value.toLowerCase());})" style="margin-bottom:.4rem;">`;
 
   const existingRows = Object.entries(gSticky).map(([chId, entry]) => {
     const ch = guild?.channels.cache.get(chId);
+    if (chId === editChannelId) {
+      return `<tr style="background:var(--magenta-faint);">
+        <td colspan="3">
+          <form method="POST" action="/sticky/save?guild=${guildId}" style="padding:.6rem 0;">
+            <input type="hidden" name="channelId" value="${chId}">
+            <strong style="color:var(--magenta);font-size:.82rem;">Editing: #${ch?.name||chId}</strong>
+            <div style="margin-top:.5rem;">${embedEditorHTML('stickyContent', entry.content, 'Sticky message')}</div>
+            <textarea name="content" id="stickyContent" style="display:none;">${entry.content.replace(/</g,'&lt;')}</textarea>
+            <div style="display:flex;gap:.5rem;margin-top:.75rem;">
+              <button type="submit" class="btn btn-primary" style="font-size:.8rem;padding:.3rem .75rem;">💾 Save</button>
+              <a href="/sticky?guild=${guildId}" class="btn btn-ghost" style="font-size:.8rem;padding:.3rem .75rem;">Cancel</a>
+            </div>
+          </form>
+        </td>
+      </tr>`;
+    }
     return `<tr>
-      <td>#${ch?.name || chId}</td>
-      <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${entry.content}</td>
-      <td><form method="POST" action="/sticky/delete?guild=${guildId}"><input type="hidden" name="channelId" value="${chId}"><button type="submit" class="btn btn-danger" style="padding:.25rem .6rem;font-size:.75rem;">Remove</button></form></td>
+      <td style="white-space:nowrap">#${ch?.name||chId}</td>
+      <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:.85rem;">${entry.content.replace(/</g,'&lt;')}</td>
+      <td style="white-space:nowrap;display:flex;gap:.4rem;">
+        <a href="/sticky?guild=${guildId}&edit=${chId}" class="btn btn-ghost" style="padding:.25rem .6rem;font-size:.75rem;">✏️ Edit</a>
+        <form method="POST" action="/sticky/delete?guild=${guildId}" style="display:inline"><input type="hidden" name="channelId" value="${chId}"><button type="submit" class="btn btn-danger" style="padding:.25rem .6rem;font-size:.75rem;">🗑 Remove</button></form>
+      </td>
     </tr>`;
   }).join('');
 
-  const body = `
+  const body = `${EMBED_EDITOR_SCRIPT}
     <div class="page-title">STICKY POSTS</div>
-    <div class="page-sub">Messages that re-post themselves at the bottom of a channel whenever someone else sends a message.</div>
+    <div class="page-sub">Messages that re-post at the bottom of a channel whenever someone else sends a message.</div>
     ${flash}
     <div class="card">
       <div class="card-title">Add Sticky Post</div>
       <form method="POST" action="/sticky/save?guild=${guildId}">
         <div class="form-row"><label>Channel</label>
+          ${chanSearch}
           <select name="channelId"><option value="">— select channel —</option>
-            ${channels.map(c => `<option value="${c.id}">${c.type === ChannelType.GuildVoice ? '🔊' : '#'} ${c.name}</option>`).join('')}
+            ${channels.map(c=>`<option value="${c.id}">${c.type===ChannelType.GuildVoice?'🔊':'#'} ${c.name}</option>`).join('')}
           </select>
         </div>
-        <div class="form-row"><label>Message content</label><textarea name="content" placeholder="Enter your sticky message..." rows="4"></textarea></div>
-        <button type="submit" class="btn btn-primary">📌 Set Sticky</button>
+        <div class="form-row">
+          <label>Message (use the editor below to add text + images)</label>
+          <textarea name="content" id="newStickyContent" placeholder="Your sticky message..." rows="3" style="margin-bottom:.4rem;"></textarea>
+          ${embedEditorHTML('newStickyContent')}
+        </div>
+        <button type="submit" class="btn btn-primary" style="margin-top:.75rem;">📌 Set Sticky</button>
       </form>
     </div>
-    ${existingRows ? `<div class="card"><div class="card-title">Active Sticky Posts</div><table><thead><tr><th>Channel</th><th>Message</th><th></th></tr></thead><tbody>${existingRows}</tbody></table></div>` : ''}`;
-  res.send(renderLayout({ title: 'Sticky Posts', guildId, currentPath: '/sticky', allowedGuildIds, username: req.session.userTag, body }));
+    ${existingRows ? `<div class="card"><div class="card-title">Active Sticky Posts (${Object.keys(gSticky).length})</div><table><thead><tr><th>Channel</th><th>Message</th><th style="width:140px">Actions</th></tr></thead><tbody>${existingRows}</tbody></table></div>` : '<div class="card"><p style="color:var(--muted);">No sticky posts configured yet.</p></div>'}`;
+  res.send(renderLayout({ title:'Sticky Posts', guildId, currentPath:'/sticky', allowedGuildIds, username:req.session.userTag, body }));
 });
 
 app.post('/sticky/save', (req, res) => {
-  const guildId = resolveGuildId(req);
-  if (!guildId) return res.redirect('/');
+  const guildId = resolveGuildId(req); if (!guildId) return res.redirect('/');
   const { channelId, content } = req.body;
   if (!channelId || !content?.trim()) return res.redirect(`/sticky?guild=${guildId}&flash=${encodeURIComponent('❌ Channel and message are required.')}`);
-  const sticky = loadSticky();
-  if (!sticky[guildId]) sticky[guildId] = {};
+  const sticky = loadSticky(); if (!sticky[guildId]) sticky[guildId] = {};
   sticky[guildId][channelId] = { content: content.trim() };
   saveSticky(sticky);
   res.redirect(`/sticky?guild=${guildId}&flash=${encodeURIComponent('✅ Sticky post saved.')}`);
 });
-
 app.post('/sticky/delete', (req, res) => {
-  const guildId = resolveGuildId(req);
-  if (!guildId) return res.redirect('/');
-  const { channelId } = req.body;
-  const sticky = loadSticky();
-  if (sticky[guildId]) delete sticky[guildId][channelId];
+  const guildId = resolveGuildId(req); if (!guildId) return res.redirect('/');
+  const sticky = loadSticky(); if (sticky[guildId]) delete sticky[guildId][req.body.channelId];
   saveSticky(sticky);
   res.redirect(`/sticky?guild=${guildId}&flash=${encodeURIComponent('✅ Sticky post removed.')}`);
 });
@@ -1974,18 +2573,11 @@ function saveAR(d) { fs.writeFileSync(AR_FILE, JSON.stringify(d, null, 2)); }
 
 client.on('messageCreate', async msg => {
   if (msg.author.bot || !msg.guildId) return;
-  const ar = loadAR();
-  const gAR = ar[msg.guildId];
-  if (!gAR?.length) return;
+  const ar = loadAR(); const gAR = ar[msg.guildId]; if (!gAR?.length) return;
   const lower = msg.content.toLowerCase();
   for (const rule of gAR) {
-    const match = rule.matchType === 'exact'
-      ? lower === rule.trigger.toLowerCase()
-      : lower.includes(rule.trigger.toLowerCase());
-    if (match) {
-      await msg.channel.send(rule.response).catch(() => {});
-      break;
-    }
+    const match = rule.matchType==='exact' ? lower===rule.trigger.toLowerCase() : lower.includes(rule.trigger.toLowerCase());
+    if (match) { await msg.channel.send(rule.response).catch(()=>{}); break; }
   }
 });
 
@@ -1993,54 +2585,88 @@ app.get('/autoresponder', (req, res) => {
   const guildId = resolveGuildId(req);
   const allowedGuildIds = req.session.allowedGuildIds || [];
   if (!guildId) return res.redirect('/');
-  const ar = loadAR();
-  const gAR = ar[guildId] || [];
-  const flash = req.query.flash ? `<div class="flash flash-ok">${decodeURIComponent(req.query.flash)}</div>` : '';
-  const rows = gAR.map((rule, i) => `<tr>
-    <td><code>${rule.trigger}</code></td>
-    <td>${rule.matchType}</td>
-    <td style="max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${rule.response}</td>
-    <td><form method="POST" action="/autoresponder/delete?guild=${guildId}"><input type="hidden" name="index" value="${i}"><button type="submit" class="btn btn-danger" style="padding:.25rem .6rem;font-size:.75rem;">Remove</button></form></td>
-  </tr>`).join('');
-  const body = `
+  const ar = loadAR(); const gAR = ar[guildId] || [];
+  const flash = req.query.flash ? `<div class="flash ${req.query.flash.includes('❌')?'flash-err':'flash-ok'}">${decodeURIComponent(req.query.flash)}</div>` : '';
+  const editIdx = req.query.edit !== undefined ? parseInt(req.query.edit) : -1;
+
+  const rows = gAR.map((rule, i) => {
+    if (i === editIdx) return `<tr style="background:var(--magenta-faint);">
+      <td colspan="4">
+        <form method="POST" action="/autoresponder/update?guild=${guildId}" style="padding:.6rem 0;">
+          <input type="hidden" name="index" value="${i}">
+          <strong style="color:var(--magenta);font-size:.82rem;">Editing rule #${i+1}</strong>
+          <div style="display:flex;gap:.75rem;flex-wrap:wrap;margin-top:.5rem;">
+            <div style="flex:1;min-width:160px;"><label style="font-size:.75rem;color:var(--muted);display:block;margin-bottom:.25rem;">Trigger</label><input type="text" name="trigger" value="${rule.trigger.replace(/"/g,'&quot;')}"></div>
+            <div style="min-width:140px;"><label style="font-size:.75rem;color:var(--muted);display:block;margin-bottom:.25rem;">Match type</label><select name="matchType"><option value="contains" ${rule.matchType==='contains'?'selected':''}>Contains</option><option value="exact" ${rule.matchType==='exact'?'selected':''}>Exact</option></select></div>
+          </div>
+          <div style="margin-top:.6rem;">
+            <label style="font-size:.75rem;color:var(--muted);display:block;margin-bottom:.25rem;">Response (use the editor below)</label>
+            <textarea name="response" id="arEditContent_${i}" rows="3" style="margin-bottom:.4rem;">${rule.response.replace(/</g,'&lt;')}</textarea>
+            ${embedEditorHTML(`arEditContent_${i}`, rule.response)}
+          </div>
+          <div style="display:flex;gap:.5rem;margin-top:.75rem;">
+            <button type="submit" class="btn btn-primary" style="font-size:.8rem;padding:.3rem .75rem;">💾 Save</button>
+            <a href="/autoresponder?guild=${guildId}" class="btn btn-ghost" style="font-size:.8rem;padding:.3rem .75rem;">Cancel</a>
+          </div>
+        </form>
+      </td>
+    </tr>`;
+    return `<tr>
+      <td><code style="color:var(--magenta)">${rule.trigger.replace(/</g,'&lt;')}</code></td>
+      <td><span style="font-size:.74rem;background:var(--surface2);padding:.12rem .4rem;border-radius:3px;">${rule.matchType}</span></td>
+      <td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:.85rem;">${rule.response.replace(/</g,'&lt;')}</td>
+      <td style="white-space:nowrap;display:flex;gap:.4rem;">
+        <a href="/autoresponder?guild=${guildId}&edit=${i}" class="btn btn-ghost" style="padding:.25rem .6rem;font-size:.75rem;">✏️ Edit</a>
+        <form method="POST" action="/autoresponder/delete?guild=${guildId}" style="display:inline"><input type="hidden" name="index" value="${i}"><button type="submit" class="btn btn-danger" style="padding:.25rem .6rem;font-size:.75rem;">🗑 Remove</button></form>
+      </td>
+    </tr>`;
+  }).join('');
+
+  const body = `${EMBED_EDITOR_SCRIPT}
     <div class="page-title">AUTO RESPONDERS</div>
-    <div class="page-sub">Bot replies automatically when a trigger word or phrase is detected.</div>
+    <div class="page-sub">Bot replies automatically when a trigger word or phrase is detected in any message.</div>
     ${flash}
     <div class="card">
       <div class="card-title">Add Auto Responder</div>
       <form method="POST" action="/autoresponder/save?guild=${guildId}">
         <div class="form-row"><label>Trigger phrase</label><input type="text" name="trigger" placeholder="e.g. !rules or when does the event start"></div>
         <div class="form-row"><label>Match type</label>
-          <select name="matchType">
-            <option value="contains">Contains (trigger appears anywhere in message)</option>
-            <option value="exact">Exact match only</option>
-          </select>
+          <select name="matchType"><option value="contains">Contains — trigger appears anywhere in the message</option><option value="exact">Exact match — full message must equal trigger</option></select>
         </div>
-        <div class="form-row"><label>Response</label><textarea name="response" placeholder="Bot's reply..." rows="3"></textarea></div>
-        <button type="submit" class="btn btn-primary">➕ Add Responder</button>
+        <div class="form-row">
+          <label>Response (use the editor below to add text + images)</label>
+          <textarea name="response" id="newARContent" rows="3" style="margin-bottom:.4rem;" placeholder="Bot's reply..."></textarea>
+          ${embedEditorHTML('newARContent')}
+        </div>
+        <button type="submit" class="btn btn-primary" style="margin-top:.75rem;">➕ Add Responder</button>
       </form>
     </div>
-    ${rows ? `<div class="card"><div class="card-title">Active Responders</div><table><thead><tr><th>Trigger</th><th>Match</th><th>Response</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : ''}`;
-  res.send(renderLayout({ title: 'Auto Responders', guildId, currentPath: '/autoresponder', allowedGuildIds, username: req.session.userTag, body }));
+    ${rows ? `<div class="card"><div class="card-title">Active Responders (${gAR.length})</div><table><thead><tr><th>Trigger</th><th>Match</th><th>Response</th><th style="width:130px">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="card"><p style="color:var(--muted);">No auto responders configured yet.</p></div>'}`;
+  res.send(renderLayout({ title:'Auto Responders', guildId, currentPath:'/autoresponder', allowedGuildIds, username:req.session.userTag, body }));
 });
 
 app.post('/autoresponder/save', (req, res) => {
-  const guildId = resolveGuildId(req);
-  if (!guildId) return res.redirect('/');
+  const guildId = resolveGuildId(req); if (!guildId) return res.redirect('/');
   const { trigger, matchType, response } = req.body;
   if (!trigger?.trim() || !response?.trim()) return res.redirect(`/autoresponder?guild=${guildId}&flash=${encodeURIComponent('❌ Trigger and response are required.')}`);
-  const ar = loadAR();
-  if (!ar[guildId]) ar[guildId] = [];
-  ar[guildId].push({ trigger: trigger.trim(), matchType: matchType || 'contains', response: response.trim() });
+  const ar = loadAR(); if (!ar[guildId]) ar[guildId] = [];
+  ar[guildId].push({ trigger:trigger.trim(), matchType:matchType||'contains', response:response.trim() });
   saveAR(ar);
   res.redirect(`/autoresponder?guild=${guildId}&flash=${encodeURIComponent('✅ Auto responder added.')}`);
 });
-
-app.post('/autoresponder/delete', (req, res) => {
-  const guildId = resolveGuildId(req);
-  if (!guildId) return res.redirect('/');
-  const idx = parseInt(req.body.index);
+app.post('/autoresponder/update', (req, res) => {
+  const guildId = resolveGuildId(req); if (!guildId) return res.redirect('/');
+  const idx = parseInt(req.body.index); const { trigger, matchType, response } = req.body;
+  if (!trigger?.trim() || !response?.trim()) return res.redirect(`/autoresponder?guild=${guildId}&flash=${encodeURIComponent('❌ Trigger and response are required.')}`);
   const ar = loadAR();
+  if (!ar[guildId]?.[idx]) return res.redirect(`/autoresponder?guild=${guildId}&flash=${encodeURIComponent('❌ Responder not found.')}`);
+  ar[guildId][idx] = { trigger:trigger.trim(), matchType:matchType||'contains', response:response.trim() };
+  saveAR(ar);
+  res.redirect(`/autoresponder?guild=${guildId}&flash=${encodeURIComponent('✅ Auto responder updated.')}`);
+});
+app.post('/autoresponder/delete', (req, res) => {
+  const guildId = resolveGuildId(req); if (!guildId) return res.redirect('/');
+  const idx = parseInt(req.body.index); const ar = loadAR();
   if (ar[guildId]) ar[guildId].splice(idx, 1);
   saveAR(ar);
   res.redirect(`/autoresponder?guild=${guildId}&flash=${encodeURIComponent('✅ Auto responder removed.')}`);
