@@ -1818,12 +1818,12 @@ function renderLayout({ title, guildId, currentPath, allowedGuildIds, body, user
   return `<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>${title} — HSC Dashboard</title>
+<title>${title} — HIGH-SPEED DASHBOARD</title>
 <link rel="icon" type="image/gif" href="/images/highspeedpfp.gif">
 ${DASH_CSS}
 </head><body>
 <nav>
-  <span class="nav-logo">⚙️ HSC DASHBOARD</span>
+  <span class="nav-logo">⚙️ HIGH-SPEED DASHBOARD</span>
   <ul class="nav-links">
     <li><a href="https://high-speed-connection.fly.dev" target="_blank">← Site</a></li>
     <li class="nav-user">👤 ${username || 'Unknown'}</li>
@@ -1862,7 +1862,7 @@ app.get('/login', (req, res) => {
     const authUrl = `https://discord.com/oauth2/authorize?${params.toString()}`;
     res.send(`<!DOCTYPE html><html><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Login — HSC Dashboard</title>
+<title>LOGIN — HIGH-SPEED DASHBOARD</title>
 <link rel="icon" type="image/gif" href="/images/highspeedpfp.gif">
 ${DASH_CSS}
 </head><body>
