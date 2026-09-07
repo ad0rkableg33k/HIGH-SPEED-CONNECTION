@@ -1833,8 +1833,8 @@ ${DASH_CSS}
 <div class="layout">
   <div class="sidebar">
     <div class="sidebar-section">Server</div>
-    <div style="padding:.35rem .75rem .75rem;">
-      <select onchange="location.href=window.location.pathname+'?guild='+this.value" style="width:100%;max-width:100%;">
+    <div style="padding:.35rem .75rem .6rem;">
+      <select onchange="location.href=window.location.pathname+'?guild='+this.value" style="width:100%;">
         ${guildOptions || `<option value="${guildId}">${client.guilds.cache.get(guildId)?.name || guildId}</option>`}
       </select>
     </div>
@@ -2374,118 +2374,84 @@ client.on('messageCreate', async msg => {
 // ── EMBED EDITOR helper (shared by sticky + autoresponder) ─────────────────
 const EMBED_EDITOR_SCRIPT = `
 <script>
-// Component editor state
-let __editorComponents = [];
-let __editorIdCtr = 0;
-const __uid = () => 'ec'+(++__editorIdCtr);
-
-function __addComp(type, targetField) {
-  const c = { id: __uid(), type, content:'', url:'' };
-  __editorComponents.push(c);
-  __renderEditor(targetField);
+const __es={};let __ei=0;const __uid=()=>'e'+(++__ei);
+function __gs(tf){if(!__es[tf])__es[tf]={c:[]};return __es[tf];}
+function __addComp(type,tf){__gs(tf).c.push({id:__uid(),type,content:'',url:''});__re(tf);}
+function __removeComp(id,tf){__gs(tf).c=__gs(tf).c.filter(x=>x.id!==id);__re(tf);}
+function __moveComp(id,dir,tf){const a=__gs(tf).c,i=a.findIndex(x=>x.id===id);if(i<0)return;const t=i+dir;if(t<0||t>=a.length)return;[a[i],a[t]]=[a[t],a[i]];__re(tf);}
+function __upd(id,key,val,tf){const x=__gs(tf).c.find(c=>c.id===id);if(x){x[key]=val;__bo(tf);__rp(tf);}}
+function __bo(tf){const v=__gs(tf).c.map(c=>c.type==='text'?c.content:(c.url||'')).filter(Boolean).join('\\n\\n');const f=document.getElementById(tf);if(f)f.value=v;}
+function __rp(tf){
+  const el=document.getElementById('__sp_'+tf);if(!el)return;
+  const c=__gs(tf).c;
+  if(!c.length){el.innerHTML='<span style="color:#72767d;font-style:italic;font-size:.8rem;">Nothing yet</span>';return;}
+  el.innerHTML=c.map(x=>x.type==='text'
+    ?'<div style="color:#dcddde;font-size:.84rem;white-space:pre-wrap;word-break:break-word;margin-bottom:.35rem;">'+(x.content||'<i style="color:#4f545c">Empty text</i>')+'</div>'
+    :x.url?'<img src="'+x.url+'" style="max-width:100%;border-radius:3px;margin-bottom:.35rem;display:block;" onerror="this.outerHTML=\'<i style=color:#72767d;font-size:.75rem>Image failed</i>\'">'
+    :'<i style="color:#72767d;font-size:.78rem;display:block;margin-bottom:.35rem;">🖼 placeholder</i>'
+  ).join('');
 }
-function __removeComp(id, targetField) {
-  __editorComponents = __editorComponents.filter(c=>c.id!==id);
-  __renderEditor(targetField);
-}
-function __moveComp(id, dir, targetField) {
-  const idx = __editorComponents.findIndex(c=>c.id===id);
-  if (idx<0) return;
-  const to = idx+dir;
-  if (to<0||to>=__editorComponents.length) return;
-  [__editorComponents[idx],__editorComponents[to]]=[__editorComponents[to],__editorComponents[idx]];
-  __renderEditor(targetField);
-}
-function __updateComp(id, key, val, targetField) {
-  const c = __editorComponents.find(x=>x.id===id);
-  if (c) { c[key]=val; __buildOutput(targetField); __renderSidePreview(); }
-}
-function __buildOutput(targetField) {
-  const out = __editorComponents.map(c=>c.type==='text'?c.content:(c.url||'')).filter(Boolean).join('\\n\\n');
-  const f = document.getElementById(targetField);
-  if (f) f.value = out;
-}
-function __renderSidePreview() {
-  const el = document.getElementById('__sidePreview');
-  if (!el) return;
-  if (!__editorComponents.length) { el.innerHTML='<div style="color:#72767d;font-style:italic;font-size:.8rem;">Nothing yet</div>'; return; }
-  el.innerHTML = __editorComponents.map((c,i)=>{
-    if (c.type==='text') return \`<div style="color:#dcddde;font-size:.87rem;white-space:pre-wrap;word-break:break-word;margin-bottom:.5rem;">\${c.content||'<span style="color:#4f545c;font-style:italic;">Empty text</span>'}</div>\`;
-    if (c.type==='image') return c.url?\`<img src="\${c.url}" style="max-width:100%;border-radius:4px;margin-bottom:.5rem;display:block;" onerror="this.outerHTML='<div style=color:#72767d;font-size:.78rem;font-style:italic>⚠️ Image failed to load</div>'">\':<div style="color:#72767d;font-style:italic;font-size:.8rem;margin-bottom:.5rem;">🖼️ Image placeholder</div>\`;
-    return '';
+function __re(tf){
+  const el=document.getElementById('__ec_'+tf);if(!el)return;
+  const c=__gs(tf).c;
+  if(!c.length){el.innerHTML='<div style="border:2px dashed rgba(255,0,255,.2);border-radius:5px;padding:1rem;color:#555;font-size:.8rem;text-align:center;">📭 No components — add text or image above.</div>';__bo(tf);__rp(tf);return;}
+  el.innerHTML=c.map(function(x,i){
+    var btnStyle='background:transparent;border:1px solid rgba(255,0,255,.25);color:#ccc;border-radius:3px;padding:.1rem .35rem;font-size:.66rem;cursor:pointer;';
+    var header='<div style="display:flex;align-items:center;gap:.4rem;padding:.3rem .6rem;border-bottom:1px solid rgba(255,0,255,.1);">'
+      +'<span style="color:#f0f;font-size:.67rem;font-weight:700;text-transform:uppercase;">'+(x.type==='text'?'✏️ Text':'🖼️ Image')+'</span>'
+      +'<div style="margin-left:auto;display:flex;gap:.25rem;">'
+      +'<button type="button" onclick="__moveComp(\''+x.id+'\',-1,\''+tf+'\')" '+(i===0?'disabled':'')+' style="'+btnStyle+'">▲</button>'
+      +'<button type="button" onclick="__moveComp(\''+x.id+'\',1,\''+tf+'\')" '+(i===c.length-1?'disabled':'')+' style="'+btnStyle+'">▼</button>'
+      +'<button type="button" onclick="__removeComp(\''+x.id+'\',\''+tf+'\')" style="background:#c0392b;border:none;color:#fff;border-radius:3px;padding:.1rem .35rem;font-size:.66rem;cursor:pointer;">🗑</button>'
+      +'</div></div>';
+    var inStyle='width:100%;background:#111;border:1px solid rgba(255,0,255,.18);color:#e0e0e0;padding:.35rem .5rem;border-radius:4px;font-size:.82rem;font-family:inherit;';
+    var body;
+    if(x.type==='text'){
+      body='<textarea rows="3" maxlength="4000" oninput="__upd(\''+x.id+'\',\'content\',this.value,\''+tf+'\')" style="'+inStyle+'resize:vertical;">'+x.content+'</textarea>'
+        +'<div style="font-size:.67rem;color:#555;text-align:right;">'+x.content.length+'/4000</div>';
+    } else {
+      var imgHtml=x.url?'<img src="'+x.url+'" style="max-width:100%;max-height:140px;object-fit:contain;" onerror="this.parentElement.innerHTML=\'<div style=color:#555;font-size:.77rem;padding:.5rem;>⚠️ Image failed</div>\'">'
+        :'<div style="color:#555;font-size:.77rem;padding:.5rem;">🖼️ Paste image URL above</div>';
+      body='<input type="text" value="'+x.url+'" oninput="__upd(\''+x.id+'\',\'url\',this.value,\''+tf+'\');__ri(\''+x.id+'\',this.value,\''+tf+'\')" placeholder="https://example.com/image.png" style="'+inStyle+'margin-bottom:.4rem;box-sizing:border-box;">'
+        +'<div id="__ip_'+x.id+'" style="background:#111;border-radius:4px;border:1px solid rgba(255,0,255,.12);min-height:50px;display:flex;align-items:center;justify-content:center;">'+imgHtml+'</div>';
+    }
+    return '<div style="background:#181818;border:1px solid rgba(255,0,255,.2);border-radius:5px;margin-bottom:.4rem;">'+header+'<div style="padding:.55rem;">'+body+'</div></div>';
   }).join('');
+  __bo(tf);__rp(tf);
 }
-function __renderEditor(targetField) {
-  const el = document.getElementById('__editorCanvas');
-  if (!el) return;
-  if (!__editorComponents.length) {
-    el.innerHTML=\`<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;color:#555;gap:.5rem;padding:2rem;border:2px dashed rgba(255,0,255,.2);border-radius:6px;text-align:center;min-height:120px;"><div style="font-size:1.5rem;">📭</div><div style="font-size:.82rem;">No components — add text or image below.</div></div>\`;
-    __buildOutput(targetField); __renderSidePreview(); return;
-  }
-  el.innerHTML = __editorComponents.map((c,i)=>\`
-    <div style="background:#181818;border:1px solid rgba(255,0,255,.18);border-radius:6px;margin-bottom:.5rem;">
-      <div style="display:flex;align-items:center;gap:.5rem;padding:.4rem .7rem;border-bottom:1px solid rgba(255,0,255,.12);user-select:none;">
-        <span style="color:#555;font-size:.9rem;">⠿⠿</span>
-        <span style="font-size:.7rem;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:#FF00FF;">\${c.type==='text'?'✏️ Text':'🖼️ Image'}</span>
-        <div style="margin-left:auto;display:flex;gap:.3rem;">
-          <button type="button" onclick="__moveComp('\${c.id}',-1,'\${targetField}')" style="background:transparent;border:1px solid rgba(255,0,255,.2);color:#e0e0e0;border-radius:3px;padding:.15rem .4rem;font-size:.7rem;cursor:pointer;" \${i===0?'disabled':''}>▲</button>
-          <button type="button" onclick="__moveComp('\${c.id}',1,'\${targetField}')" style="background:transparent;border:1px solid rgba(255,0,255,.2);color:#e0e0e0;border-radius:3px;padding:.15rem .4rem;font-size:.7rem;cursor:pointer;" \${i===__editorComponents.length-1?'disabled':''}>▼</button>
-          <button type="button" onclick="__removeComp('\${c.id}','\${targetField}')" style="background:#c0392b;border:none;color:#fff;border-radius:3px;padding:.15rem .4rem;font-size:.7rem;cursor:pointer;">🗑</button>
-        </div>
-      </div>
-      <div style="padding:.7rem;">
-        \${c.type==='text'?\`
-          <textarea rows="3" maxlength="4000" oninput="__updateComp('\${c.id}','content',this.value,'\${targetField}')" placeholder="Content of the text component." style="width:100%;background:#111;border:1px solid rgba(255,0,255,.18);color:#e0e0e0;padding:.4rem .6rem;border-radius:4px;font-size:.84rem;font-family:inherit;resize:vertical;">\${c.content}</textarea>
-          <div style="font-size:.68rem;color:#555;text-align:right;">\${c.content.length}/4000</div>
-        \`:\`
-          <input type="text" value="\${c.url}" oninput="__updateComp('\${c.id}','url',this.value,'\${targetField}');__refreshImg('__img_\${c.id}',this.value)" placeholder="https://example.com/image.png" style="width:100%;background:#111;border:1px solid rgba(255,0,255,.18);color:#e0e0e0;padding:.4rem .6rem;border-radius:4px;font-size:.84rem;font-family:inherit;margin-bottom:.5rem;">
-          <div id="__img_\${c.id}" style="background:#111;border-radius:4px;overflow:hidden;border:1px solid rgba(255,0,255,.12);display:flex;align-items:center;justify-content:center;min-height:60px;">
-            \${c.url?\`<img src="\${c.url}" style="max-width:100%;max-height:160px;object-fit:contain;" onerror="this.parentElement.innerHTML='<div style=color:#555;font-size:.8rem;padding:.75rem;>⚠️ Image failed to load</div>'">\`:'<div style="color:#555;font-size:.8rem;padding:.75rem;">🖼️ Add Media — paste an image URL above</div>'}
-          </div>
-        \`}
-      </div>
-    </div>
-  \`).join('');
-  __buildOutput(targetField); __renderSidePreview();
+function __ri(id,url,tf){
+  const el=document.getElementById('__ip_'+id);if(!el)return;
+  if(!url){el.innerHTML='<div style="color:#555;font-size:.77rem;padding:.5rem;">🖼️ Paste image URL above</div>';return;}
+  el.innerHTML='<img src="'+url+'" style="max-width:100%;max-height:140px;object-fit:contain;" onerror="this.parentElement.innerHTML=\'<div style=color:#555;font-size:.77rem;padding:.5rem;>⚠️ Image failed</div>\'">';
+  __rp(tf);
 }
-function __refreshImg(elId, url) {
-  const el = document.getElementById(elId); if (!el) return;
-  if (!url) { el.innerHTML='<div style="color:#555;font-size:.8rem;padding:.75rem;">🖼️ Add Media — paste an image URL above</div>'; return; }
-  el.innerHTML=\`<img src="\${url}" style="max-width:100%;max-height:160px;object-fit:contain;" onerror="this.parentElement.innerHTML='<div style=color:#555;font-size:.8rem;padding:.75rem;>⚠️ Image failed to load</div>'">\`;
-}
-function __initEditor(targetField, existingContent) {
-  __editorComponents = [];
-  if (existingContent) {
-    existingContent.split(/\\n\\n+/).forEach(part => {
-      part = part.trim(); if (!part) return;
-      if (part.match(/^https?:\\/\\/.+\\.(png|jpg|jpeg|gif|webp)(\\?.*)?$/i)) __editorComponents.push({ id:__uid(), type:'image', url:part, content:'' });
-      else __editorComponents.push({ id:__uid(), type:'text', content:part, url:'' });
-    });
-  }
-  __renderEditor(targetField);
+function __initEditor(tf,ec){
+  __gs(tf).c=[];
+  if(ec&&ec.trim()){ec.split(/\\n\\n+/).forEach(p=>{p=p.trim();if(!p)return;/^https?:\/\/.+\.(png|jpg|jpeg|gif|webp|svg)(\?.*)?$/i.test(p)?__gs(tf).c.push({id:__uid(),type:'image',url:p,content:''}):__gs(tf).c.push({id:__uid(),type:'text',content:p,url:''});});}
+  __re(tf);
 }
 </script>`;
 
-function embedEditorHTML(targetFieldId, existingContent = '', label = 'Message') {
+function embedEditorHTML(targetFieldId, existingContent = '') {
   const escaped = (existingContent||'').replace(/\\/g,'\\\\').replace(/`/g,'\\`');
-  return `
-    <div style="display:flex;gap:1rem;margin-top:.5rem;">
-      <div style="flex:1;min-width:0;">
-        <div style="display:flex;gap:.4rem;margin-bottom:.5rem;flex-wrap:wrap;">
-          <button type="button" class="btn btn-ghost" style="font-size:.78rem;padding:.3rem .7rem;" onclick="__addComp('text','${targetFieldId}')">✏️ Add Text</button>
-          <button type="button" class="btn btn-ghost" style="font-size:.78rem;padding:.3rem .7rem;" onclick="__addComp('image','${targetFieldId}')">🖼️ Add Image</button>
-        </div>
-        <div id="__editorCanvas"></div>
+  return `<div style="display:flex;gap:1rem;margin-top:.45rem;align-items:flex-start;">
+    <div style="flex:1;min-width:0;">
+      <div style="display:flex;gap:.4rem;margin-bottom:.4rem;">
+        <button type="button" class="btn btn-ghost" style="font-size:.77rem;padding:.26rem .62rem;" onclick="__addComp('text','${targetFieldId}')">✏️ Add Text</button>
+        <button type="button" class="btn btn-ghost" style="font-size:.77rem;padding:.26rem .62rem;" onclick="__addComp('image','${targetFieldId}')">🖼️ Add Image</button>
       </div>
-      <div style="width:220px;flex-shrink:0;">
-        <div style="font-size:.62rem;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--magenta);margin-bottom:.4rem;">Discord Preview</div>
-        <div id="__sidePreview" style="background:#36393f;border-radius:6px;padding:.75rem 1rem;border:1px solid rgba(255,255,255,.06);min-height:60px;">
-          <div style="color:#72767d;font-style:italic;font-size:.8rem;">Nothing yet</div>
-        </div>
+      <div id="__ec_${targetFieldId}"></div>
+    </div>
+    <div style="width:200px;flex-shrink:0;">
+      <div style="font-size:.61rem;font-weight:700;letter-spacing:.13em;text-transform:uppercase;color:var(--magenta);margin-bottom:.3rem;">Discord Preview</div>
+      <div id="__sp_${targetFieldId}" style="background:#36393f;border-radius:5px;padding:.65rem .85rem;border:1px solid rgba(255,255,255,.06);min-height:50px;">
+        <span style="color:#72767d;font-style:italic;font-size:.8rem;">Nothing yet</span>
       </div>
     </div>
-    <script>document.addEventListener('DOMContentLoaded',()=>__initEditor('${targetFieldId}',\`${escaped}\`));</script>`;
+  </div>
+  <script>document.addEventListener('DOMContentLoaded',()=>__initEditor('${targetFieldId}',\`${escaped}\`));</script>`;
 }
+
 
 app.get('/sticky', (req, res) => {
   const guildId = resolveGuildId(req);
@@ -2700,9 +2666,11 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   async function postJoinMessage(member, vcChannel) {
     if (!member || member.user.bot) return;
 
+    // Roles to tag in the message
     const tagRoleIds = cfg.tagRoleIds?.length ? cfg.tagRoleIds : [];
     const roleMentions = tagRoleIds.map(id => `<@&${id}>`).join(' ');
 
+    // Custom message with variable substitution
     const buildMsg = (custom) => custom
       ? custom
           .replace(/{user}/g,    `${member}`)
@@ -2712,28 +2680,17 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
       : `🔊 ${member} joined **${vcChannel?.name || 'a voice channel'}**${roleMentions ? ` · ${roleMentions}` : ''}`;
 
     const nonBotSize = vcChannel?.members?.filter(m => !m.user.bot).size ?? 0;
-    const isNewlyActive = nonBotSize === 1;
+    const isNewlyActive = nonBotSize === 1; // channel just went 0→1
 
-    // Resolve vcTextChannelId — supports plain ID or a Discord channel URL
-    // e.g. https://discord.com/channels/GUILD_ID/CHANNEL_ID
-    let resolvedVcTextId = cfg.vcTextChannelId;
-    if (resolvedVcTextId) {
-      const urlMatch = resolvedVcTextId.match(/\/channels\/\d+\/(\d+)/);
-      if (urlMatch) resolvedVcTextId = urlMatch[1];
-    }
-
-    // 1. Post to the configured VC text channel (ID or URL)
-    if (resolvedVcTextId) {
-      const vcText = guild.channels.cache.get(resolvedVcTextId);
+    // 1. Post inside the VC's linked text channel (vcTextChannelId)
+    if (cfg.vcTextChannelId) {
+      const vcText = guild.channels.cache.get(cfg.vcTextChannelId);
       if (vcText) await vcText.send(buildMsg(cfg.announceMsg)).catch(() => {});
     }
 
     // 2. Post to the separate announcement channel when VC goes 0→1
     if (cfg.announceChannelId && isNewlyActive) {
-      let resolvedAnnounceId = cfg.announceChannelId;
-      const urlMatch = resolvedAnnounceId?.match(/\/channels\/\d+\/(\d+)/);
-      if (urlMatch) resolvedAnnounceId = urlMatch[1];
-      const announceChannel = guild.channels.cache.get(resolvedAnnounceId);
+      const announceChannel = guild.channels.cache.get(cfg.announceChannelId);
       if (announceChannel) await announceChannel.send(buildMsg(cfg.announceMsg)).catch(() => {});
     }
   }
@@ -2838,18 +2795,15 @@ app.get('/temproles', (req, res) => {
       <td><span style="color:var(--magenta)">@${role?.name || r.roleId}</span></td>
       <td>${r.durationMinutes} min</td>
       <td>
-        <form method="POST" action="/temproles/timed/postbutton?guild=${guildId}" style="display:flex;flex-direction:column;gap:.35rem;">
+        <form method="POST" action="/temproles/timed/postbutton?guild=${guildId}" style="display:flex;gap:.35rem;align-items:center;flex-wrap:wrap;">
           <input type="hidden" name="roleId" value="${r.roleId}">
           <input type="hidden" name="durationMinutes" value="${r.durationMinutes}">
-          <div style="display:flex;gap:.35rem;align-items:center;flex-wrap:wrap;">
-            <input type="text" placeholder="Search #..." oninput="fsearch(this,this.nextElementSibling)" style="width:90px;padding:.2rem .4rem;font-size:.78rem;">
-            <select name="channelId" style="flex:1;min-width:110px;padding:.2rem .4rem;font-size:.78rem;">
-              <option value="">— channel —</option>${chanOpts('')}
-            </select>
-            <input type="text" name="label" value="Get Role" style="width:80px;padding:.2rem .4rem;font-size:.78rem;" placeholder="Button label">
-          </div>
-          <textarea name="message" rows="2" placeholder="Message above the button (optional)..." style="font-size:.78rem;padding:.3rem .5rem;resize:vertical;"></textarea>
-          <button type="submit" class="btn btn-ghost" style="padding:.25rem .6rem;font-size:.75rem;align-self:flex-start;">📤 Post Button</button>
+          <input type="text" placeholder="Search #..." oninput="fsearch(this,this.nextElementSibling)" style="width:100px;padding:.2rem .4rem;font-size:.78rem;">
+          <select name="channelId" style="flex:1;min-width:110px;padding:.2rem .4rem;font-size:.78rem;">
+            <option value="">— channel —</option>${chanOpts('')}
+          </select>
+          <input type="text" name="label" value="Get Role" style="width:80px;padding:.2rem .4rem;font-size:.78rem;">
+          <button type="submit" class="btn btn-ghost" style="padding:.2rem .5rem;font-size:.75rem;">📤 Post</button>
         </form>
       </td>
       <td><form method="POST" action="/temproles/timed/delete?guild=${guildId}"><input type="hidden" name="index" value="${i}"><button type="submit" class="btn btn-danger" style="padding:.2rem .5rem;font-size:.75rem;">🗑</button></form></td>
@@ -2898,10 +2852,8 @@ app.get('/temproles', (req, res) => {
         </div>
 
         <div class="form-row"><label>VC text channel — join message posts here every time</label>
-          <p style="font-size:.75rem;color:var(--muted);margin-bottom:.4rem;">Paste a Discord channel URL (e.g. <code>https://discord.com/channels/.../...</code>) or select from the dropdown. VC text channels linked to a voice channel appear here too.</p>
-          <input type="text" name="vcTextChannelUrl" value="${cfg.vcTextChannelId||''}" placeholder="https://discord.com/channels/... or leave blank and use dropdown" style="margin-bottom:.4rem;">
           <input type="text" placeholder="Search #..." oninput="fsearch(this,this.nextElementSibling)" style="margin-bottom:.3rem;">
-          <select name="vcTextChannelId"><option value="">— or select from list —</option>${chanOpts(cfg.vcTextChannelId)}</select>
+          <select name="vcTextChannelId"><option value="">— none —</option>${chanOpts(cfg.vcTextChannelId)}</select>
         </div>
 
         <div class="form-row"><label>Announcement channel — posts only when VC goes 0 → 1 person</label>
@@ -2951,14 +2903,8 @@ app.post('/temproles/vc/save', (req, res) => {
   if (!tr[guildId]) tr[guildId] = {};
   const mc = req.body.monitoredChannelIds;
   const tr2 = req.body.tagRoleIds;
-  // vcTextChannelId — prefer the URL/ID text field, fall back to dropdown
-  let vcTextVal = req.body.vcTextChannelUrl?.trim() || req.body.vcTextChannelId || null;
-  if (vcTextVal) {
-    const urlMatch = vcTextVal.match(/\/channels\/\d+\/(\d+)/);
-    if (urlMatch) vcTextVal = urlMatch[1]; // extract channel ID from URL
-  }
   tr[guildId].vcRoleId            = req.body.vcRoleId || null;
-  tr[guildId].vcTextChannelId     = vcTextVal || null;
+  tr[guildId].vcTextChannelId     = req.body.vcTextChannelId || null;
   tr[guildId].announceChannelId   = req.body.announceChannelId || null;
   tr[guildId].announceMsg         = req.body.announceMsg?.trim() || null;
   tr[guildId].monitoredChannelIds = mc ? (Array.isArray(mc) ? mc : [mc]) : [];
@@ -2983,7 +2929,7 @@ app.post('/temproles/timed/save', (req, res) => {
 app.post('/temproles/timed/postbutton', async (req, res) => {
   const guildId = resolveGuildId(req);
   if (!guildId) return res.redirect('/');
-  const { roleId, channelId, label, durationMinutes, message } = req.body;
+  const { roleId, channelId, label, durationMinutes } = req.body;
   if (!channelId) return res.redirect(`/temproles?guild=${guildId}&flash=${encodeURIComponent('❌ Select a channel to post to.')}`);
   const guild = client.guilds.cache.get(guildId);
   const ch = guild?.channels.cache.get(channelId);
@@ -2991,9 +2937,10 @@ app.post('/temproles/timed/postbutton', async (req, res) => {
   try {
     const role = guild.roles.cache.get(roleId);
     const btn = new ButtonBuilder().setCustomId(`temprole:${roleId}`).setLabel(label?.trim() || 'Get Role').setStyle(ButtonStyle.Primary);
-    const content = message?.trim()
-      || `Click the button below to receive the **${role?.name || 'role'}** for ${durationMinutes} minute(s).`;
-    await ch.send({ content, components: [new ActionRowBuilder().addComponents(btn)] });
+    await ch.send({
+      content: `Click the button below to receive the **${role?.name || 'role'}** for ${durationMinutes} minute(s).`,
+      components: [new ActionRowBuilder().addComponents(btn)],
+    });
     res.redirect(`/temproles?guild=${guildId}&flash=${encodeURIComponent('✅ Button posted to #' + ch.name)}`);
   } catch (err) {
     res.redirect(`/temproles?guild=${guildId}&flash=${encodeURIComponent('❌ Error: ' + err.message)}`);
