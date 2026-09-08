@@ -2784,7 +2784,7 @@ app.get('/temproles', (req, res) => {
   const tagRoleIds   = cfg.tagRoleIds || [];
 
   // Shared inline search helper
-  const srch = `<script>function fsearch(inp,sel){const v=inp.value.toLowerCase();sel.querySelectorAll('option').forEach(o=>{o.hidden=o.value&&!o.text.toLowerCase().includes(v);});}</script>`;
+  const srch = `<script>function fsearch(inp,sel){const v=inp.value.toLowerCase();const cur=sel.value;const all=sel._opts||(sel._opts=[...sel.options].map(o=>({v:o.value,t:o.text})));while(sel.options.length)sel.remove(0);all.forEach(o=>{if(!o.v||o.t.toLowerCase().includes(v)){const el=document.createElement('option');el.value=o.v;el.text=o.t;sel.add(el);}});sel.value=cur;}</script>`;
 
   const roleOpts  = (sel) => roles.map(r => `<option value="${r.id}" ${r.id===sel?'selected':''}>${r.name}</option>`).join('');
   const chanOpts  = (sel) => textChannels.map(c => `<option value="${c.id}" ${c.id===sel?'selected':''}>#${c.name}</option>`).join('');
