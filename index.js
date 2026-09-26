@@ -553,15 +553,18 @@ async function runShuffleRound(guild, guildId) {
   }
 
   // Move into cloud rooms
+  // IMPORTANT: read cfg.cloudRoomIds live inside the loop — the snapshot at the top
+  // of the function is stale on round 1 when rooms are created mid-loop.
+  if (!cfg.cloudRoomIds) cfg.cloudRoomIds = [];
   const activeRoomIds = [];
   for (let i = 0; i < groups.length; i++) {
-    let roomCh = cloudRoomIds[i] ? guild.channels.cache.get(cloudRoomIds[i]) : null;
+    const existingId = cfg.cloudRoomIds[i];
+    let roomCh = existingId ? guild.channels.cache.get(existingId) : null;
     if (!roomCh) {
       try {
-        roomCh = await guild.channels.create({ name: `speed-match-${i + 1}`, type: ChannelType.GuildVoice, parent: cfg.categoryId || null, reason: `💨 HSC round #${round} overflow` });
-        if (!cfg.cloudRoomIds) cfg.cloudRoomIds = [];
-        cfg.cloudRoomIds.push(roomCh.id);
-      } catch (err) { console.error(`[speed-match] create overflow room:`, err.message); continue; }
+        roomCh = await guild.channels.create({ name: `speed-match-${i + 1}`, type: ChannelType.GuildVoice, parent: cfg.categoryId || null, reason: `💨 HSC round #${round} room` });
+        cfg.cloudRoomIds[i] = roomCh.id; // slot it in at the right index
+      } catch (err) { console.error(`[speed-match] create room ${i + 1}:`, err.message); continue; }
     }
     activeRoomIds.push(roomCh.id);
     for (const m of groups[i])
@@ -571,10 +574,11 @@ async function runShuffleRound(guild, guildId) {
     await postRoomActionButtons(guild, guildId, roomCh, groups[i]);
   }
 
-  // Move anyone in unused cloud rooms back to lobby
+  // Move anyone in EXTRA cloud rooms (beyond what this round needs) back to lobby.
+  // Use cfg.cloudRoomIds here — never the stale snapshot — so we catch all extras.
   const lobby = guild.channels.cache.get(cfg.lobbyChannelIds[0]);
-  for (let i = groups.length; i < cloudRoomIds.length; i++) {
-    const roomCh = guild.channels.cache.get(cloudRoomIds[i]);
+  for (let i = groups.length; i < cfg.cloudRoomIds.length; i++) {
+    const roomCh = guild.channels.cache.get(cfg.cloudRoomIds[i]);
     if (!roomCh) continue;
     for (const m of roomCh.members.values()) {
       if (m.user.bot) continue;
@@ -582,6 +586,9 @@ async function runShuffleRound(guild, guildId) {
     }
   }
   cfg.createdChannelIds = activeRoomIds;
+  // Trim cloudRoomIds to exactly the rooms used this round — prevents stale extra
+  // entries from causing members to be swept back to lobby in future rounds.
+  cfg.cloudRoomIds = activeRoomIds;
   saveVcShuffleConfig(vcShuffleConfig);
 
   // Post matchups embed
