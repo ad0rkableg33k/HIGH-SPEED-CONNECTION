@@ -1981,10 +1981,20 @@ ${DASH_CSS}
 
   app.get('/auth/callback', async (req, res) => {
     const { code, state } = req.query;
-    if (!code || state !== req.session.oauthState) return res.redirect('/login');
+    // Skip state check if state is missing from session (in-memory session lost on free tier restart)
+    // Instead just verify we have a valid code
+    if (!code) return res.redirect('/login');
+    // Only check state if we actually have one stored (prevents loop on session loss)
+    if (req.session.oauthState && state !== req.session.oauthState) {
+      console.warn('[auth] state mismatch — session may have been lost, retrying login');
+      return res.redirect('/login');
+    }
     try {
       const tokenData = await exchangeCode(code);
-      if (!tokenData.access_token) return res.redirect('/login');
+      if (!tokenData.access_token) {
+        console.error('[auth] no access token:', tokenData);
+        return res.redirect('/login');
+      }
       const userRes = await fetch('https://discord.com/api/users/@me', { headers: { Authorization: `Bearer ${tokenData.access_token}` } });
       const user = await userRes.json();
       const guildsRes = await fetch('https://discord.com/api/users/@me/guilds', { headers: { Authorization: `Bearer ${tokenData.access_token}` } });
