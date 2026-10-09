@@ -1672,6 +1672,7 @@ async function main() {
 // ===========================================================================
 const express = require('express');
 const session = require('express-session');
+const MongoStore = require('connect-mongo');
 
 const PORT                  = process.env.PORT || 3000;
 const DISCORD_CLIENT_ID     = process.env.DISCORD_CLIENT_ID;
@@ -1823,11 +1824,17 @@ function startWebServer() {
   app.set('trust proxy', 1);
   app.use(express.urlencoded({ extended: true, limit: '3mb' }));
   app.use(express.json({ limit: '3mb' }));
-  // In-memory sessions — fine for Render (users just re-login after a restart)
+  // MongoDB-backed sessions — survive restarts and multiple instances
   app.use(session({
     secret: SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
+    store: MongoStore.create({
+      mongoUrl: MONGODB_URI,
+      dbName: 'hsc_bot',
+      collectionName: 'sessions',
+      ttl: 7 * 24 * 60 * 60, // 7 days
+    }),
     cookie: { httpOnly: true, secure: isProduction, sameSite: 'lax', maxAge: 7 * 24 * 60 * 60 * 1000 },
   }));
 

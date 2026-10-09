@@ -16,6 +16,7 @@
     "dotenv": "^17.4.2",
     "express": "^4.19.2",
     "express-session": "^1.18.0",
-    "mongodb": "^6.8.0"
+    "mongodb": "^6.8.0",
+    "connect-mongo": "^5.1.0"
   }
 }
