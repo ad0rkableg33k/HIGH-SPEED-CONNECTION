@@ -1661,6 +1661,15 @@ async function main() {
   });
 
   client.on('error', err => console.error('[discord] client error:', err));
+  client.on('shardDisconnect', (event, shardId) => {
+    console.warn(`[discord] shard ${shardId} disconnected — will auto-reconnect`);
+  });
+  client.on('shardReconnecting', shardId => {
+    console.log(`[discord] shard ${shardId} reconnecting...`);
+  });
+  client.on('shardResume', (shardId, replayedEvents) => {
+    console.log(`[discord] shard ${shardId} resumed (replayed ${replayedEvents} events)`);
+  });
   process.on('unhandledRejection', err => console.error('[process] unhandledRejection:', err));
 
   client.login(TOKEN);
