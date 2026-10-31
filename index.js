@@ -147,6 +147,18 @@ function clearAllCameraWarningsForGuild(guildId) {
   }
 }
 
+// Ask Discord directly where someone is RIGHT NOW. The bot's own cache can go stale
+// (missed "left the channel" events), which can cause warnings for people who already left.
+async function getLiveVoice(guildId, userId) {
+  try {
+    const v = await client.rest.get(`/guilds/${guildId}/voice-states/${userId}`);
+    return { channelId: v.channel_id || null, selfVideo: !!v.self_video };
+  } catch (err) {
+    if (err?.status === 404 || err?.code === 10065) return { channelId: null, selfVideo: false };
+    throw err;
+  }
+}
+
 async function handleCameraOff(member, channel) {
   const guildId = member.guild.id;
   const key = warnKey(guildId, member.id);
@@ -159,16 +171,22 @@ async function handleCameraOff(member, channel) {
   const graceTimeoutId = setTimeout(async () => {
     try {
       if (!isCameraPolicyEnabled(guildId)) { warnedUsers.delete(key); return; }
-      const cvc = member.voice?.channel;
+      const live = await getLiveVoice(guildId, member.id);
+      const cacheChId = member.voice?.channelId || null;
+      if (cacheChId !== live.channelId) console.warn(`[camera] GHOST PREVENTED: cache said ${cacheChId}, Discord says ${live.channelId} (user ${member.id})`);
+      const cvc = live.channelId ? member.guild.channels.cache.get(live.channelId) : null;
       const stillIn = cvc && getEffectiveMonitoredChannelIds(guildId, member.guild).has(cvc.id);
-      if (!stillIn || member.voice.selfVideo) { warnedUsers.delete(key); return; }
+      if (!stillIn || live.selfVideo) { warnedUsers.delete(key); return; }
+      console.log(`[camera] warning user ${member.id} in channel ${cvc.id}`);
       await cvc.send(`<@${member.id}> 📷 Please enable your camera — you have **${warningMinutes} minute(s)** before you'll be moved out of ${cvc}.${announcementLine(guildId)}`);
       const warnTimeoutId = setTimeout(async () => {
         try {
           if (!isCameraPolicyEnabled(guildId)) { warnedUsers.delete(key); return; }
-          const c2 = member.voice?.channel;
+          const live2 = await getLiveVoice(guildId, member.id);
+          const c2 = live2.channelId ? member.guild.channels.cache.get(live2.channelId) : null;
           const in2 = c2 && getEffectiveMonitoredChannelIds(guildId, member.guild).has(c2.id);
-          if (in2 && !member.voice.selfVideo) {
+          if (in2 && !live2.selfVideo) {
+            console.log(`[camera] removing user ${member.id} from channel ${c2.id}`);
             await member.voice.disconnect('Camera not enabled within warning period');
             await c2.send(`<@${member.id}> ❌ You were moved out for not enabling your camera. Feel free to rejoin anytime with it on!`);
           }
@@ -1712,7 +1730,9 @@ async function saveSticky(d) {
 }
 
 const stickyLastMsg = {};
+const STICKY_ENABLED = false; // set to true to turn sticky posts back on
 client.on('messageCreate', async msg => {
+  if (!STICKY_ENABLED) return;
   if (msg.author.bot) return;
   const gSticky = stickyCache[msg.guildId]; if (!gSticky) return;
   const entry = gSticky[msg.channelId]; if (!entry?.content) return;
@@ -1736,7 +1756,9 @@ async function saveAR(d) {
   return dbSet('autoresponders', d);
 }
 
+const AUTORESPONDER_ENABLED = false; // set to true to turn auto responders back on
 client.on('messageCreate', async msg => {
+  if (!AUTORESPONDER_ENABLED) return;
   if (msg.author.bot || !msg.guildId) return;
   const gAR = arCache[msg.guildId]; if (!gAR?.length) return;
   const lower = msg.content.toLowerCase();
