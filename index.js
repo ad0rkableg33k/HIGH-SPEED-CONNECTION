@@ -1,7 +1,7 @@
 // HIGH-SPEED CONNECTION — Discord community management bot
 // - Channel indexer + camera policy + High-Speed Connection VC events
 // - OAuth2 dashboard (Discord login) — users see only their own guilds
-// - Storage: MongoDB Atlas (replaces local JSON files for Render.com compatibility)
+// - Storage: MongoDB Atlas
 
 require('dotenv').config();
 const path   = require('path');
@@ -1665,6 +1665,9 @@ async function main() {
     loadChannelIndexConfig(),
     loadAllDescriptions(),
     loadVcShuffleConfig(),
+    loadTR(),       // temp roles (was never loaded at startup)
+    loadSticky(),   // sticky posts
+    loadAR(),       // auto responders
   ]);
   console.log('[startup] All configs loaded from MongoDB');
 
@@ -1705,8 +1708,8 @@ const PORT                  = process.env.PORT || 3000;
 const DISCORD_CLIENT_ID     = process.env.DISCORD_CLIENT_ID;
 const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET;
 const SESSION_SECRET        = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
-const REDIRECT_URI          = process.env.DISCORD_REDIRECT_URI || 'https://your-app.onrender.com/auth/callback';
-const DASHBOARD_URL         = process.env.DASHBOARD_URL || 'https://your-app.onrender.com';
+const REDIRECT_URI          = process.env.DISCORD_REDIRECT_URI || 'http://localhost:3000/auth/callback';
+const DASHBOARD_URL         = process.env.DASHBOARD_URL || 'http://localhost:3000';
 
 if (!DISCORD_CLIENT_ID || !DISCORD_CLIENT_SECRET)
   console.warn('[dashboard] DISCORD_CLIENT_ID or DISCORD_CLIENT_SECRET not set — OAuth login will fail.');
