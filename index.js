@@ -1708,8 +1708,8 @@ const PORT                  = process.env.PORT || 3000;
 const DISCORD_CLIENT_ID     = process.env.DISCORD_CLIENT_ID;
 const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET;
 const SESSION_SECRET        = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
-const REDIRECT_URI          = process.env.DISCORD_REDIRECT_URI || 'http://localhost:3000/auth/callback';
-const DASHBOARD_URL         = process.env.DASHBOARD_URL || 'http://localhost:3000';
+const REDIRECT_URI          = process.env.DISCORD_REDIRECT_URI || 'https://squeezing-vanquish-shudder.ngrok-free.dev';
+const DASHBOARD_URL         = process.env.DASHBOARD_URL || 'https://squeezing-vanquish-shudder.ngrok-free.dev';
 
 if (!DISCORD_CLIENT_ID || !DISCORD_CLIENT_SECRET)
   console.warn('[dashboard] DISCORD_CLIENT_ID or DISCORD_CLIENT_SECRET not set — OAuth login will fail.');
@@ -2004,8 +2004,10 @@ ${DASH_CSS}
   // ── auth routes ───────────────────────────────────────────────────────
   app.get('/login', (req, res) => {
     if (req.session?.userId) return res.redirect('/');
-    const state = crypto.randomBytes(16).toString('hex');
+    // Reuse the pending state so extra /login hits (double loads, redirects) don't overwrite it.
+    const state = req.session.oauthState || crypto.randomBytes(16).toString('hex');
     req.session.oauthState = state;
+    console.log(`[auth] /login session=${String(req.sessionID).slice(0, 6)} state=${state.slice(0, 6)}`);
     req.session.save(err => {
       if (err) console.error('[auth] session save error:', err);
       const params = new URLSearchParams({ client_id: DISCORD_CLIENT_ID, redirect_uri: REDIRECT_URI, response_type: 'code', scope: 'identify guilds', state });
@@ -2024,6 +2026,7 @@ ${DASH_CSS}
     const { code, state } = req.query;
     // Skip state check if state is missing from session (in-memory session lost on free tier restart)
     // Instead just verify we have a valid code
+    console.log(`[auth] callback session=${String(req.sessionID).slice(0, 6)} stored=${String(req.session.oauthState || 'none').slice(0, 6)} got=${String(state || 'none').slice(0, 6)}`);
     if (!code) return res.redirect('/login');
     // Only check state if we actually have one stored (prevents loop on session loss)
     if (req.session.oauthState && state !== req.session.oauthState) {
