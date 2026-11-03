@@ -1708,8 +1708,8 @@ const PORT                  = process.env.PORT || 3000;
 const DISCORD_CLIENT_ID     = process.env.DISCORD_CLIENT_ID;
 const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET;
 const SESSION_SECRET        = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
-const REDIRECT_URI          = process.env.DISCORD_REDIRECT_URI || 'https://squeezing-vanquish-shudder.ngrok-free.dev';
-const DASHBOARD_URL         = process.env.DASHBOARD_URL || 'https://squeezing-vanquish-shudder.ngrok-free.dev';
+const REDIRECT_URI          = process.env.DISCORD_REDIRECT_URI || 'http://localhost:3000/auth/callback';
+const DASHBOARD_URL         = process.env.DASHBOARD_URL || 'http://localhost:3000';
 
 if (!DISCORD_CLIENT_ID || !DISCORD_CLIENT_SECRET)
   console.warn('[dashboard] DISCORD_CLIENT_ID or DISCORD_CLIENT_SECRET not set — OAuth login will fail.');
@@ -1960,7 +1960,7 @@ function startWebServer() {
       return `<option value="${id}" ${id === guildId ? 'selected' : ''}>${g ? g.name : id}</option>`;
     }).join('');
     const navItems = [
-      ['/', 'Overview'], ['/camera', 'Camera Policy'], ['/channel-index', 'Channel Index'],
+      ['/', 'Overview'], ['/camera', 'Camera Policy'], ['/camera/setup/1', '✨ Camera Setup (guided)'], ['/channel-index', 'Channel Index'],
       ['/speed-match', 'Speed Match'], ['/sticky', 'Sticky Posts'],
       ['/autoresponder', 'Auto Responders'], ['/temproles', 'Temp Roles'],
     ];
@@ -2119,6 +2119,11 @@ ${DASH_CSS}
     const body = `${searchScript}
       <div class="page-title">CAMERA POLICY</div>
       <div class="page-sub">Enforce camera-on rules in voice channels.</div>
+      <div class="card" style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;">
+        <div><div class="card-title" style="margin-bottom:.35rem;">✨ Want a walkthrough?</div>
+          <div style="font-size:.85rem;color:var(--muted);">Set up Camera Policy one step at a time: channels, timing, exempt roles, announcement, then review.</div></div>
+        <a class="btn btn-primary" href="/camera/setup/1?guild=${guildId}" style="text-decoration:none;">✨ Guided Setup</a>
+      </div>
       ${flash}
       <form method="POST" action="/camera/save/status?guild=${guildId}">
         <div class="card"><div class="card-title">Status</div>
@@ -2201,6 +2206,263 @@ ${DASH_CSS}
     cameraConfig[guildId].exemptRoles = er ? (Array.isArray(er) ? er : [er]) : [];
     await saveCameraConfig(cameraConfig);
     res.redirect(`/camera?guild=${guildId}&flash=${encodeURIComponent('✅ Exempt roles saved.')}`);
+  });
+
+  // ── camera setup wizard (guided, step by step) ───────────────────────
+  const WIZ_STEPS = [
+    { n: 1, label: 'Channels' },
+    { n: 2, label: 'Timing' },
+    { n: 3, label: 'Exempt roles' },
+    { n: 4, label: 'Announcement' },
+    { n: 5, label: 'Review' },
+  ];
+  const wizEsc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const wizArr = v => (v == null ? [] : (Array.isArray(v) ? v : [v]));
+
+  const WIZ_CSS = `<style>
+    .wiz-steps{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:.75rem;}
+    .wiz-step{display:flex;align-items:center;gap:.45rem;padding:.35rem .7rem;border:1px solid var(--border);border-radius:999px;font-size:.78rem;color:var(--muted);text-decoration:none;}
+    .wiz-step:hover{text-decoration:none;border-color:var(--magenta);}
+    .wiz-num{width:20px;height:20px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;background:var(--surface2);font-size:.7rem;font-weight:600;}
+    .wiz-step.active{color:var(--magenta);border-color:var(--magenta);background:var(--magenta-faint);}
+    .wiz-step.active .wiz-num{background:var(--magenta);color:#000;}
+    .wiz-step.done{color:var(--text);}
+    .wiz-step.done .wiz-num{background:rgba(0,255,100,.18);color:#00ff64;}
+    .wiz-bar{height:4px;background:var(--border);border-radius:2px;margin-bottom:1.5rem;overflow:hidden;}
+    .wiz-bar-fill{height:100%;background:var(--magenta);box-shadow:0 0 10px var(--magenta-glow);}
+    .wiz-nav{display:flex;justify-content:space-between;align-items:center;margin-top:1.25rem;gap:.75rem;flex-wrap:wrap;}
+    .wiz-hint{font-size:.85rem;color:var(--muted);margin-bottom:1.1rem;line-height:1.55;}
+    .wiz-hidden{position:absolute;left:-9999px;width:1px;height:1px;opacity:0;}
+    .wiz-chips{display:flex;flex-wrap:wrap;gap:.35rem;}
+    .wiz-chip{padding:.15rem .6rem;border-radius:999px;background:var(--surface2);border:1px solid var(--border);font-size:.78rem;}
+    .wiz-sum td:first-child{color:var(--muted);width:150px;vertical-align:top;}
+    .wiz-edit{font-size:.75rem;margin-left:.6rem;}
+    .wiz-preview{background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:.75rem 1rem;font-size:.84rem;line-height:1.5;margin-top:.25rem;}
+  </style>`;
+  const WIZ_JS = `<script>
+    function flist(inp,listId){var v=inp.value.toLowerCase();document.querySelectorAll('#'+listId+' label').forEach(function(l){l.style.display=l.textContent.toLowerCase().indexOf(v)>-1?'':'none';});}
+    function wizAll(listId,on){document.querySelectorAll('#'+listId+' label').forEach(function(l){if(l.style.display!=='none'){var c=l.querySelector('input');if(c)c.checked=on;}});}
+    function wizTime(){var g=parseInt(document.getElementById('wg').value,10)||0;var w=parseInt(document.getElementById('ww').value,10)||0;
+      document.getElementById('wprev').textContent='Someone joins with their camera off \\u2192 '+g+' min of quiet time \\u2192 the bot posts a reminder \\u2192 '+w+' more min to turn it on \\u2192 if not, they are moved out of the voice channel ('+(g+w)+' min total).';}
+  </script>`;
+
+  function wizChecklist(id, name, items, checkedIds, labelOf) {
+    return `
+      <input type="text" placeholder="Search..." oninput="flist(this,'${id}')" style="margin-bottom:.4rem;">
+      <div style="display:flex;gap:.5rem;margin-bottom:.4rem;">
+        <button type="button" class="btn btn-ghost" style="padding:.25rem .7rem;font-size:.75rem;" onclick="wizAll('${id}',true)">Select all shown</button>
+        <button type="button" class="btn btn-ghost" style="padding:.25rem .7rem;font-size:.75rem;" onclick="wizAll('${id}',false)">Clear shown</button>
+      </div>
+      <div id="${id}" style="max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:4px;background:var(--surface2);">
+        ${items.length ? items.map(i => `<label style="display:flex;align-items:center;gap:.6rem;padding:.4rem .75rem;font-size:.85rem;cursor:pointer;">
+          <input type="checkbox" name="${name}" value="${i.id}" ${checkedIds.includes(i.id) ? 'checked' : ''}> ${labelOf(i)}
+        </label>`).join('') : '<div style="padding:.75rem;color:var(--muted);font-size:.85rem;">Nothing to show here yet.</div>'}
+      </div>`;
+  }
+
+  function wizGuildLists(guild) {
+    const all = [...guild.channels.cache.values()];
+    const byName = (a, b) => a.name.localeCompare(b.name);
+    const isVoice = c => c.type === ChannelType.GuildVoice || c.type === ChannelType.GuildStageVoice;
+    return {
+      voice: all.filter(isVoice).sort(byName),
+      cats: all.filter(c => c.type === ChannelType.GuildCategory).sort(byName),
+      text: all.filter(c => c.type === ChannelType.GuildText).sort(byName),
+      roles: [...guild.roles.cache.values()].filter(r => r.id !== guild.id).sort((a, b) => b.position - a.position),
+      isVoice,
+    };
+  }
+
+  function wizardPage(req, res, step) {
+    const guildId = resolveGuildId(req);
+    if (!guildId) return res.redirect('/');
+    const guild = client.guilds.cache.get(guildId);
+    if (!guild) return res.redirect('/');
+    const allowedGuildIds = req.session.allowedGuildIds || [];
+    const cfg = ensureGuildConfig(guildId);
+    const L = wizGuildLists(guild);
+    const q = `?guild=${guildId}`;
+    const flashRaw = req.query.flash ? String(req.query.flash) : '';
+    const flash = flashRaw ? `<div class="flash ${flashRaw.includes('❌') ? 'flash-err' : 'flash-ok'}">${wizEsc(flashRaw)}</div>` : '';
+
+    const stepper = `<div class="wiz-steps">${WIZ_STEPS.map(s => {
+      const cls = s.n === step ? 'wiz-step active' : (s.n < step ? 'wiz-step done' : 'wiz-step');
+      return `<a class="${cls}" href="/camera/setup/${s.n}${q}"><span class="wiz-num">${s.n < step ? '✓' : s.n}</span><span>${s.label}</span></a>`;
+    }).join('')}</div>
+    <div class="wiz-bar"><div class="wiz-bar-fill" style="width:${Math.round(step / WIZ_STEPS.length * 100)}%"></div></div>`;
+
+    const navButtons = ({ next = 'Save &amp; Next →', skip = false } = {}) => `
+      <div class="wiz-nav">
+        ${step > 1 ? '<button type="submit" name="action" value="back" class="btn btn-ghost">← Back</button>' : '<span></span>'}
+        <span style="display:flex;gap:.6rem;">
+          ${skip ? '<button type="submit" name="action" value="skip" class="btn btn-ghost">Skip</button>' : ''}
+          <button type="submit" name="action" value="next" class="btn btn-primary">${next}</button>
+        </span>
+      </div>`;
+    // Pressing Enter submits the FIRST submit button in the form, so put a hidden "next" first.
+    const defaultBtn = (value = 'next') => `<button type="submit" name="action" value="${value}" class="wiz-hidden" tabindex="-1" aria-hidden="true"></button>`;
+    const formOpen = `<form method="POST" action="/camera/setup/${step}${q}">${defaultBtn()}`;
+
+    let title = '', hint = '', content = '';
+
+    if (step === 1) {
+      title = 'Which channels need cameras?';
+      hint = 'Pick the voice channels where cameras are required. Choosing a <strong>category</strong> covers every voice channel inside it, including ones you add later.';
+      const mon = cfg.monitoredChannels || [], monCats = cfg.monitoredCategoryIds || [];
+      content = `${formOpen}
+        <div class="card"><div class="card-title">Voice channels</div>
+          ${wizChecklist('wiz-vc', 'channels', L.voice, mon, c => `🔊 ${wizEsc(c.name)}${c.parent ? ` <span style="opacity:.5;font-size:.75rem;">(${wizEsc(c.parent.name)})</span>` : ''}`)}
+        </div>
+        <div class="card"><div class="card-title">Categories (optional)</div>
+          ${wizChecklist('wiz-cat', 'categories', L.cats, monCats, c => `📁 ${wizEsc(c.name)}`)}
+        </div>
+        ${navButtons()}
+      </form>`;
+    } else if (step === 2) {
+      title = 'How long do people have?';
+      hint = 'Two timers: a quiet <strong>grace period</strong> (no message, so people can get settled), then a <strong>warning period</strong> that starts when the bot posts a reminder.';
+      const g = cfg.graceMinutes ?? DEFAULT_GRACE_MINUTES;
+      const w = cfg.warningMinutes ?? DEFAULT_WARNING_MINUTES;
+      content = `${formOpen}
+        <div class="card"><div class="card-title">Timing</div>
+          <div class="form-row"><label>Grace period (minutes, 0–60). Nothing is posted during this time.</label>
+            <input type="number" id="wg" name="graceMinutes" value="${g}" min="0" max="60" oninput="wizTime()"></div>
+          <div class="form-row"><label>Warning period (minutes, 1–60). Starts after the reminder is posted.</label>
+            <input type="number" id="ww" name="warningMinutes" value="${w}" min="1" max="60" oninput="wizTime()"></div>
+          <div class="wiz-preview" id="wprev"></div>
+        </div>
+        ${navButtons()}
+      </form>
+      <script>wizTime();</script>`;
+    } else if (step === 3) {
+      title = 'Who is exempt?';
+      hint = 'Members with any of these roles are never warned or moved out. Great for staff, bots, or people who can\'t use a camera. <strong>Optional</strong> — you can skip this.';
+      content = `${formOpen}
+        <div class="card"><div class="card-title">Exempt roles</div>
+          ${wizChecklist('wiz-roles', 'roles', L.roles, cfg.exemptRoles || [], r => `@${wizEsc(r.name)}`)}
+        </div>
+        ${navButtons({ skip: true })}
+      </form>`;
+    } else if (step === 4) {
+      title = 'Announcement (optional)';
+      hint = 'If you posted the camera rules somewhere, add the link here and the reminder will point people to it. <strong>Optional</strong> — you can skip this.';
+      content = `${formOpen}
+        <div class="card"><div class="card-title">Announcement</div>
+          <div class="form-row"><label>Announcement channel</label>
+            <select name="announcementChannelId"><option value="">— none —</option>
+              ${L.text.map(c => `<option value="${c.id}" ${cfg.announcementChannelId === c.id ? 'selected' : ''}>#${wizEsc(c.name)}</option>`).join('')}
+            </select></div>
+          <div class="form-row"><label>Link to the policy post</label>
+            <input type="text" name="announcementUrl" value="${wizEsc(cfg.announcementUrl || '')}" placeholder="https://discord.com/channels/..."></div>
+        </div>
+        ${navButtons({ skip: true, next: 'Save &amp; Review →' })}
+      </form>`;
+    } else {
+      title = 'Review &amp; finish';
+      hint = 'Check everything below. Nothing is enforced until you press the enable button.';
+      const chan = (cfg.monitoredChannels || []).map(id => guild.channels.cache.get(id)).filter(Boolean);
+      const cats = (cfg.monitoredCategoryIds || []).map(id => guild.channels.cache.get(id)).filter(Boolean);
+      const roles = (cfg.exemptRoles || []).map(id => guild.roles.cache.get(id)).filter(Boolean);
+      const ann = cfg.announcementChannelId ? guild.channels.cache.get(cfg.announcementChannelId) : null;
+      const g = cfg.graceMinutes ?? DEFAULT_GRACE_MINUTES, w = cfg.warningMinutes ?? DEFAULT_WARNING_MINUTES;
+      const effective = getEffectiveMonitoredChannelIds(guildId, guild).size;
+      const hasTargets = chan.length + cats.length > 0;
+      const wasOn = isCameraPolicyEnabled(guildId);
+      const chips = arr => arr.length ? `<div class="wiz-chips">${arr.join('')}</div>` : '<span style="color:var(--muted);">None</span>';
+      const edit = n => `<a class="wiz-edit" href="/camera/setup/${n}${q}">Edit</a>`;
+      const voiceCount = c => [...guild.channels.cache.values()].filter(ch => ch.parentId === c.id && L.isVoice(ch)).length;
+      const primary = wasOn ? '✅ Save changes' : '✅ Save &amp; Enable';
+      const secondary = wasOn ? 'Save &amp; turn OFF' : 'Save, keep OFF';
+      content = `
+        ${hasTargets ? '' : '<div class="flash flash-err">❌ No channels or categories are selected yet, so there is nothing to enforce. Go back to step 1.</div>'}
+        <div class="card"><div class="card-title">Your settings</div>
+          <table class="wiz-sum">
+            <tr><td>Channels ${edit(1)}</td><td>${chips([...chan.map(c => `<span class="wiz-chip">🔊 ${wizEsc(c.name)}</span>`), ...cats.map(c => `<span class="wiz-chip">📁 ${wizEsc(c.name)} (${voiceCount(c)} voice)</span>`)])}
+              <div style="color:var(--muted);font-size:.78rem;margin-top:.4rem;">${effective} voice channel${effective === 1 ? '' : 's'} monitored in total</div></td></tr>
+            <tr><td>Timing ${edit(2)}</td><td>${g} min quiet, then ${w} min after the reminder (${g + w} min total)</td></tr>
+            <tr><td>Exempt roles ${edit(3)}</td><td>${chips(roles.map(r => `<span class="wiz-chip">@${wizEsc(r.name)}</span>`))}</td></tr>
+            <tr><td>Announcement ${edit(4)}</td><td>${ann ? '#' + wizEsc(ann.name) : '<span style="color:var(--muted);">No channel</span>'}${cfg.announcementUrl ? `<div style="font-size:.78rem;color:var(--muted);word-break:break-all;">${wizEsc(cfg.announcementUrl)}</div>` : ''}</td></tr>
+            <tr><td>Status</td><td><span class="status-dot ${wasOn ? 'status-on' : 'status-off'}"></span>Currently ${wasOn ? 'ON' : 'OFF'}</td></tr>
+          </table>
+        </div>
+        <form method="POST" action="/camera/setup/5${q}">
+          ${hasTargets ? defaultBtn('enable') : defaultBtn('save_off')}
+          <div class="wiz-nav">
+            <button type="submit" name="action" value="back" class="btn btn-ghost">← Back</button>
+            <span style="display:flex;gap:.6rem;flex-wrap:wrap;">
+              <button type="submit" name="action" value="save_off" class="btn btn-ghost">${secondary}</button>
+              ${hasTargets ? `<button type="submit" name="action" value="enable" class="btn btn-primary">${primary}</button>` : ''}
+            </span>
+          </div>
+        </form>`;
+    }
+
+    const body = `${WIZ_CSS}${WIZ_JS}
+      <div class="page-title">CAMERA POLICY SETUP</div>
+      <div class="page-sub">Step ${step} of ${WIZ_STEPS.length} · ${guild.name ? wizEsc(guild.name) : ''}</div>
+      ${stepper}
+      ${flash}
+      <h2 style="font-size:1.15rem;margin:0 0 .35rem;">${title}</h2>
+      <div class="wiz-hint">${hint}</div>
+      ${content}`;
+    res.send(renderLayout({ title: 'Camera Setup', guildId, currentPath: '/camera/setup/1', allowedGuildIds, username: req.session.userTag, body }));
+  }
+
+  app.get('/camera/setup', (req, res) => res.redirect(`/camera/setup/1${req.query.guild ? '?guild=' + encodeURIComponent(req.query.guild) : ''}`));
+  app.get('/camera/setup/:step', (req, res) => {
+    const step = parseInt(req.params.step, 10);
+    if (!(step >= 1 && step <= WIZ_STEPS.length)) return res.redirect(`/camera/setup/1${req.query.guild ? '?guild=' + encodeURIComponent(req.query.guild) : ''}`);
+    return wizardPage(req, res, step);
+  });
+
+  app.post('/camera/setup/:step', async (req, res) => {
+    const guildId = resolveGuildId(req); if (!guildId) return res.redirect('/');
+    const guild = client.guilds.cache.get(guildId); if (!guild) return res.redirect('/');
+    const step = parseInt(req.params.step, 10);
+    if (!(step >= 1 && step <= WIZ_STEPS.length)) return res.redirect(`/camera/setup/1?guild=${guildId}`);
+    const cfg = ensureGuildConfig(guildId);
+    const L = wizGuildLists(guild);
+    const action = String(req.body.action || 'next');
+    const goto = (n, flash) => res.redirect(`/camera/setup/${n}?guild=${guildId}${flash ? '&flash=' + encodeURIComponent(flash) : ''}`);
+    const dest = action === 'back' ? Math.max(1, step - 1) : Math.min(WIZ_STEPS.length, step + 1);
+
+    if (step === 5) {
+      if (action === 'back') return goto(4);
+      const wantOn = action === 'enable';
+      if (wantOn && (cfg.monitoredChannels || []).length + (cfg.monitoredCategoryIds || []).length === 0)
+        return goto(5, '❌ Pick at least one channel or category in step 1 before enabling.');
+      cfg.enabled = wantOn;
+      const ok = await saveCameraConfig(cameraConfig);
+      if (!ok) return goto(5, '❌ Could not save. Check the bot console.');
+      if (!wantOn) clearAllCameraWarningsForGuild(guildId);
+      return res.redirect(`/camera?guild=${guildId}&flash=${encodeURIComponent(wantOn ? '✅ Camera policy is set up and ENABLED.' : '✅ Camera policy saved (currently OFF).')}`);
+    }
+
+    if (action === 'skip') return goto(dest);
+
+    if (step === 1) {
+      const voiceIds = new Set(L.voice.map(c => c.id)), catIds = new Set(L.cats.map(c => c.id));
+      cfg.monitoredChannels = wizArr(req.body.channels).filter(id => voiceIds.has(id));
+      cfg.monitoredCategoryIds = wizArr(req.body.categories).filter(id => catIds.has(id));
+    } else if (step === 2) {
+      const g = parseInt(req.body.graceMinutes, 10), w = parseInt(req.body.warningMinutes, 10);
+      const bad = !Number.isInteger(g) || g < 0 || g > 60 || !Number.isInteger(w) || w < 1 || w > 60;
+      if (bad) return action === 'back' ? goto(dest) : goto(2, '❌ Grace must be 0–60 minutes and warning 1–60 minutes.');
+      cfg.graceMinutes = g; cfg.warningMinutes = w;
+    } else if (step === 3) {
+      const roleIds = new Set(L.roles.map(r => r.id));
+      cfg.exemptRoles = wizArr(req.body.roles).filter(id => roleIds.has(id));
+    } else if (step === 4) {
+      const textIds = new Set(L.text.map(c => c.id));
+      const chId = String(req.body.announcementChannelId || '');
+      const url = String(req.body.announcementUrl || '').trim();
+      if (url && !/^https?:\/\/[^\s<>]+$/.test(url)) return action === 'back' ? goto(dest) : goto(4, '❌ That link doesn\'t look right. It should start with https://');
+      cfg.announcementChannelId = textIds.has(chId) ? chId : null;
+      cfg.announcementUrl = url || null;
+    }
+    const ok = await saveCameraConfig(cameraConfig);
+    if (!ok) return goto(step, '❌ Could not save. Check the bot console.');
+    return goto(dest);
   });
 
   // ── channel index ─────────────────────────────────────────────────────
