@@ -797,7 +797,8 @@ function buildMainMenuMessage() {
     .setDescription('Select a feature to configure. Each module walks you through setup one step at a time.\n\n> Return here anytime with `/setup`.');
   const moduleSelect = new StringSelectMenuBuilder().setCustomId('setup:main:select').setPlaceholder('Choose a feature to set up...')
     .addOptions(
-      { label: 'Camera Policy',   description: 'Enforce cameras-on in voice channels',            value: 'camera',      emoji: '📷' },
+      { label: 'Camera Policy — Guided Setup', description: 'Step-by-step walkthrough (recommended)',   value: 'camerawizard', emoji: '✨' },
+      { label: 'Camera Policy — Quick Edit',   description: 'Change one camera setting at a time',      value: 'camera',      emoji: '📷' },
       { label: 'Speed Match',     description: 'Configure speed matching events',                  value: 'speedmatch',  emoji: '💨' },
       { label: 'Temp Roles',      description: 'VC presence roles and timed button roles',         value: 'temproles',   emoji: '🎭' },
       { label: 'Sticky Notes',    description: 'Messages that re-pin at the bottom of a channel', value: 'sticky',      emoji: '📌' },
@@ -846,6 +847,179 @@ function buildCameraCategoriesMenuMessage(guildId) {
   return { embeds: [embed], components: [backRow, new ActionRowBuilder().addComponents(categorySelect)] };
 }
 
+// ===========================================================================
+//  CAMERA POLICY — GUIDED SETUP WIZARD (Discord)  ·  /camera-setup
+//  Each step saves instantly; Next / Back / Skip just move between steps.
+// ===========================================================================
+const CAMWIZ_STEPS = ['Channels', 'Timing', 'Exempt roles', 'Announcement', 'Review'];
+const CAMWIZ_GRACE_OPTS = [0, 1, 2, 3, 5, 10, 15, 30];
+const CAMWIZ_WARN_OPTS = [1, 2, 3, 5, 10, 15, 30];
+const CAMWIZ_URL_RE = /^https?:\/\/[^\s<>]+$/;
+
+function camwizState(guild) {
+  const cfg = ensureGuildConfig(guild.id);
+  const ch = ids => (ids || []).filter(id => guild.channels.cache.has(id));
+  return {
+    cfg,
+    chans: ch(cfg.monitoredChannels),
+    cats: ch(cfg.monitoredCategoryIds),
+    roles: (cfg.exemptRoles || []).filter(id => guild.roles.cache.has(id)),
+    g: cfg.graceMinutes ?? DEFAULT_GRACE_MINUTES,
+    w: cfg.warningMinutes ?? DEFAULT_WARNING_MINUTES,
+    annCh: cfg.announcementChannelId && guild.channels.cache.has(cfg.announcementChannelId) ? cfg.announcementChannelId : null,
+  };
+}
+
+function camwizSummary(guild, s) {
+  const ch = s.chans.length ? s.chans.map(id => `<#${id}>`).join(', ') : '*None yet*';
+  const cat = s.cats.length ? s.cats.map(id => `<#${id}>`).join(', ') : '*None*';
+  const roles = s.roles.length ? s.roles.map(id => `<@&${id}>`).join(', ') : '*None*';
+  const ann = (s.annCh ? `<#${s.annCh}>` : '*No channel*') + (s.cfg.announcementUrl ? ` · [policy link](${s.cfg.announcementUrl})` : '');
+  return `**Voice channels:** ${ch}\n**Categories:** ${cat}\n**Timing:** ${s.g} min quiet, then ${s.w} min after the reminder (${s.g + s.w} min total)\n**Exempt roles:** ${roles}\n**Announcement:** ${ann}\n**Status:** ${isCameraPolicyEnabled(guild.id) ? '🟢 ON' : '🔴 OFF'}`;
+}
+
+function buildCamWizMessage(guild, step) {
+  const s = camwizState(guild);
+  const total = CAMWIZ_STEPS.length;
+  const bar = '▰'.repeat(step) + '▱'.repeat(total - step);
+  const embed = new EmbedBuilder().setColor(0x8a2be2).setTitle('📷 Camera Policy Setup')
+    .setFooter({ text: `Step ${step} of ${total} · ${CAMWIZ_STEPS[step - 1]}` });
+  const rows = [];
+
+  const navRow = (o = {}) => {
+    const r = new ActionRowBuilder();
+    if (step > 1) r.addComponents(new ButtonBuilder().setCustomId(`camwiz:go:${step - 1}`).setLabel('◀ Back').setStyle(ButtonStyle.Secondary));
+    if (o.extra) r.addComponents(o.extra);
+    if (o.skip) r.addComponents(new ButtonBuilder().setCustomId(`camwiz:skip:${step + 1}`).setLabel('Skip').setStyle(ButtonStyle.Secondary));
+    r.addComponents(new ButtonBuilder().setCustomId(`camwiz:go:${step + 1}`).setLabel(o.next || 'Next ▶').setStyle(ButtonStyle.Primary));
+    return r;
+  };
+
+  if (step === 1) {
+    const many = s.chans.length > 25 || s.cats.length > 25;
+    embed.setDescription(
+      `${bar}\n**Which voice channels need cameras?**\nPick channels and/or whole categories below. Your picks save instantly, then press **Next**.\n\n` +
+      `**Channels:** ${s.chans.length ? s.chans.map(id => `<#${id}>`).join(', ') : '*None yet*'}\n` +
+      `**Categories:** ${s.cats.length ? s.cats.map(id => `<#${id}>`).join(', ') : '*None*'}\n\n` +
+      `> 💡 A category covers every voice channel inside it, including ones you add later.` +
+      (many ? '\n> ⚠️ More than 25 are saved. Changing a menu here replaces that list, so use the web dashboard to edit the full list.' : ''));
+    const chSel = new ChannelSelectMenuBuilder().setCustomId('camwiz:ch').setPlaceholder('Select voice channels...')
+      .setChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice).setMinValues(0).setMaxValues(25);
+    if (s.chans.length) chSel.setDefaultChannels(...s.chans.slice(0, 25));
+    const catSel = new ChannelSelectMenuBuilder().setCustomId('camwiz:cat').setPlaceholder('Select categories (optional)...')
+      .setChannelTypes(ChannelType.GuildCategory).setMinValues(0).setMaxValues(25);
+    if (s.cats.length) catSel.setDefaultChannels(...s.cats.slice(0, 25));
+    rows.push(new ActionRowBuilder().addComponents(chSel), new ActionRowBuilder().addComponents(catSel), navRow());
+  } else if (step === 2) {
+    embed.setDescription(
+      `${bar}\n**How long do people have?**\nTwo timers: a quiet **grace period** (no message), then a **warning period** that starts when the reminder is posted.\n\n` +
+      `Someone joins with their camera off → **${s.g} min** quiet → reminder → **${s.w} min** to turn it on → moved out of the channel.\n\n` +
+      `> Need a custom number? \`/camera-timing set\` accepts any value from 0–60.`);
+    const opts = (list, cur, fmt) => [...new Set([...list, cur])].sort((a, b) => a - b).map(n => ({ label: fmt(n), value: String(n), default: n === cur }));
+    const graceSel = new StringSelectMenuBuilder().setCustomId('camwiz:grace').setPlaceholder('Quiet time before the reminder')
+      .addOptions(opts(CAMWIZ_GRACE_OPTS, s.g, n => n === 0 ? '0 minutes (remind right away)' : `${n} minute${n === 1 ? '' : 's'} quiet time`));
+    const warnSel = new StringSelectMenuBuilder().setCustomId('camwiz:warn').setPlaceholder('Time to comply after the reminder')
+      .addOptions(opts(CAMWIZ_WARN_OPTS, s.w, n => `${n} minute${n === 1 ? '' : 's'} after the reminder`));
+    rows.push(new ActionRowBuilder().addComponents(graceSel), new ActionRowBuilder().addComponents(warnSel), navRow());
+  } else if (step === 3) {
+    embed.setDescription(
+      `${bar}\n**Who is exempt?**\nMembers with any of these roles are never warned or moved out. Great for staff, bots, or people who can't use a camera. *Optional, you can skip this.*\n\n` +
+      `**Exempt roles:** ${s.roles.length ? s.roles.map(id => `<@&${id}>`).join(', ') : '*None*'}`);
+    const roleSel = new RoleSelectMenuBuilder().setCustomId('camwiz:roles').setPlaceholder('Select exempt roles...').setMinValues(0).setMaxValues(25);
+    if (s.roles.length) roleSel.setDefaultRoles(...s.roles.slice(0, 25));
+    rows.push(new ActionRowBuilder().addComponents(roleSel), navRow({ skip: true }));
+  } else if (step === 4) {
+    embed.setDescription(
+      `${bar}\n**Announcement (optional)**\nIf you posted the camera rules somewhere, add them here and the reminder will link to the policy. *Optional, you can skip this.*\n\n` +
+      `**Channel:** ${s.annCh ? `<#${s.annCh}>` : '*None*'}\n**Policy link:** ${s.cfg.announcementUrl ? `[view post](${s.cfg.announcementUrl})` : '*None*'}`);
+    const annSel = new ChannelSelectMenuBuilder().setCustomId('camwiz:annch').setPlaceholder('Select announcement channel (optional)...')
+      .setChannelTypes(ChannelType.GuildText).setMinValues(0).setMaxValues(1);
+    if (s.annCh) annSel.setDefaultChannels(s.annCh);
+    const linkBtn = new ButtonBuilder().setCustomId('camwiz:annurl').setLabel('🔗 Set policy link').setStyle(ButtonStyle.Secondary);
+    rows.push(new ActionRowBuilder().addComponents(annSel), navRow({ extra: linkBtn, skip: true, next: 'Review ▶' }));
+  } else {
+    const hasTargets = s.chans.length + s.cats.length > 0;
+    const wasOn = isCameraPolicyEnabled(guild.id);
+    embed.setDescription(
+      `${bar}\n**Review & finish**\nNothing is enforced until you press the enable button.\n\n${camwizSummary(guild, s)}` +
+      (hasTargets ? '' : '\n\n❌ **No channels or categories are selected**, so there is nothing to enforce. Go back to step 1.'));
+    const r = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('camwiz:go:4').setLabel('◀ Back').setStyle(ButtonStyle.Secondary));
+    r.addComponents(new ButtonBuilder().setCustomId('camwiz:finish:off').setLabel(wasOn ? 'Save & turn OFF' : 'Save, keep OFF').setStyle(ButtonStyle.Secondary));
+    if (hasTargets) r.addComponents(new ButtonBuilder().setCustomId('camwiz:finish:on').setLabel(wasOn ? '✅ Save changes' : '✅ Save & Enable').setStyle(ButtonStyle.Success));
+    rows.push(r);
+  }
+  return { embeds: [embed], components: rows };
+}
+
+client.on('interactionCreate', async (interaction) => {
+  const isCmd = interaction.isChatInputCommand?.() && interaction.commandName === 'camera-setup';
+  const isWiz = !isCmd && typeof interaction.customId === 'string' && interaction.customId.startsWith('camwiz:');
+  if (!isCmd && !isWiz) return;
+  try {
+    if (!interaction.inGuild() || !interaction.guild)
+      return interaction.reply({ content: '❌ Use this inside a server.', flags: MessageFlags.Ephemeral });
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild))
+      return interaction.reply({ content: '❌ You need the **Manage Server** permission to use this.', flags: MessageFlags.Ephemeral });
+    const guild = interaction.guild; const guildId = guild.id;
+    if (isCmd) return interaction.reply({ ...buildCamWizMessage(guild, 1), flags: MessageFlags.Ephemeral });
+
+    const id = interaction.customId; const cfg = ensureGuildConfig(guildId);
+    const saveAndShow = async (step) => {
+      const ok = await saveCameraConfig(cameraConfig);
+      await interaction.update(buildCamWizMessage(guild, step));
+      if (!ok) await interaction.followUp({ content: '⚠️ Save failed. Check the bot console.', flags: MessageFlags.Ephemeral });
+    };
+
+    if (id.startsWith('camwiz:go:') || id.startsWith('camwiz:skip:')) {
+      const n = parseInt(id.split(':')[2], 10);
+      return interaction.update(buildCamWizMessage(guild, Math.min(Math.max(Number.isInteger(n) ? n : 1, 1), CAMWIZ_STEPS.length)));
+    }
+    if (id === 'camwiz:ch')    { cfg.monitoredChannels = interaction.values; return saveAndShow(1); }
+    if (id === 'camwiz:cat')   { cfg.monitoredCategoryIds = interaction.values; return saveAndShow(1); }
+    if (id === 'camwiz:grace') { const n = parseInt(interaction.values[0], 10); if (Number.isInteger(n) && n >= 0 && n <= 60) cfg.graceMinutes = n; return saveAndShow(2); }
+    if (id === 'camwiz:warn')  { const n = parseInt(interaction.values[0], 10); if (Number.isInteger(n) && n >= 1 && n <= 60) cfg.warningMinutes = n; return saveAndShow(2); }
+    if (id === 'camwiz:roles') { cfg.exemptRoles = interaction.values; return saveAndShow(3); }
+    if (id === 'camwiz:annch') { cfg.announcementChannelId = interaction.values[0] || null; return saveAndShow(4); }
+    if (id === 'camwiz:annurl') {
+      const modal = new ModalBuilder().setCustomId('camwiz:annurl:modal').setTitle('Camera Policy Link');
+      modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('url').setLabel('Link to your policy post (optional)')
+        .setStyle(TextInputStyle.Short).setValue(cfg.announcementUrl || '').setRequired(false).setPlaceholder('https://discord.com/channels/...')));
+      return interaction.showModal(modal);
+    }
+    if (id === 'camwiz:annurl:modal') {
+      const url = (interaction.fields.getTextInputValue('url') || '').trim();
+      if (url && !CAMWIZ_URL_RE.test(url)) return interaction.reply({ content: '❌ That link doesn\'t look right. It should start with `https://`.', flags: MessageFlags.Ephemeral });
+      cfg.announcementUrl = url || null;
+      const ok = await saveCameraConfig(cameraConfig);
+      const msg = buildCamWizMessage(guild, 4);
+      if (interaction.isFromMessage?.()) await interaction.update(msg); else await interaction.reply({ ...msg, flags: MessageFlags.Ephemeral });
+      if (!ok) await interaction.followUp({ content: '⚠️ Save failed. Check the bot console.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+    if (id === 'camwiz:finish:on' || id === 'camwiz:finish:off') {
+      const wantOn = id.endsWith(':on');
+      const s = camwizState(guild);
+      if (wantOn && s.chans.length + s.cats.length === 0)
+        return interaction.reply({ content: '❌ Pick at least one channel or category first (step 1).', flags: MessageFlags.Ephemeral });
+      cfg.enabled = wantOn;
+      const ok = await saveCameraConfig(cameraConfig);
+      if (!wantOn) clearAllCameraWarningsForGuild(guildId);
+      const done = new EmbedBuilder().setColor(wantOn ? 0x2ecc71 : 0x2b2d31)
+        .setTitle(wantOn ? '✅ Camera policy is ON' : '✅ Camera policy saved (currently OFF)')
+        .setDescription(`${camwizSummary(guild, camwizState(guild))}\n\n> Run \`/camera-setup\` any time to change something, or \`/camera-status\` to view it.`);
+      await interaction.update({ embeds: [done], components: [] });
+      if (!ok) await interaction.followUp({ content: '⚠️ Save failed. Check the bot console.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+  } catch (err) {
+    console.error('[camwiz] error:', err);
+    try {
+      const m = { content: '❌ Something went wrong. Check the bot console.', flags: MessageFlags.Ephemeral };
+      if (interaction.deferred || interaction.replied) await interaction.followUp(m); else await interaction.reply(m);
+    } catch {}
+  }
+});
+
 client.on('interactionCreate', async (interaction) => {
   try {
     if (interaction.isChatInputCommand() && interaction.commandName === 'setup')
@@ -858,6 +1032,7 @@ client.on('interactionCreate', async (interaction) => {
     if (id === 'setup:main') return interaction.update(buildMainMenuMessage());
     if (id === 'setup:main:select') {
       const v = interaction.values[0];
+      if (v === 'camerawizard') return interaction.update(buildCamWizMessage(interaction.guild, 1));
       if (v === 'camera')     return interaction.update(buildCameraMenuMessage(guildId));
       if (v === 'speedmatch') return interaction.update(buildSpeedMatchSetupMessage(guildId));
       if (v === 'temproles')  return interaction.update(buildTempRolesSetupMessage(guildId));
@@ -1192,6 +1367,7 @@ client.on('interactionCreate', async (interaction) => {
 // ===========================================================================
 const commands = [
   new SlashCommandBuilder().setName('setup').setDescription('Open the HIGH-SPEED CONNECTION BOT configuration menu').setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+  new SlashCommandBuilder().setName('camera-setup').setDescription('Guided, step-by-step Camera Policy setup').setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
   new SlashCommandBuilder().setName('help').setDescription('Show all available HIGH-SPEED CONNECTION BOT commands'),
   new SlashCommandBuilder().setName('botinfo').setDescription('Show info about HIGH-SPEED CONNECTION BOT'),
   new SlashCommandBuilder().setName('serverinfo').setDescription('Show info about this server'),
@@ -1277,7 +1453,7 @@ client.on('interactionCreate', async (interaction) => {
         .addFields(
           { name: '📋 General',              value: '`/help` `/botinfo` `/serverinfo` `/userinfo` `/roleinfo` `/purge`', inline: false },
           { name: '# Channel Index',         value: '`/channel-index` `/export-channels`', inline: false },
-          { name: '📷 Camera Policy',        value: '`/camera-policy` `/camera-status` `/camera-monitor` `/camera-exempt-role` `/camera-timing` `/camera-announcement`', inline: false },
+          { name: '📷 Camera Policy',        value: '`/camera-setup` (guided walkthrough) · `/camera-policy` `/camera-status` `/camera-monitor` `/camera-exempt-role` `/camera-timing` `/camera-announcement`', inline: false },
           { name: '💨 High-Speed Connection',value: '`/speed-match start/stop/status/shuffle-now/end-session`\n`/speed-match set-connection-mode` `/speed-match set-holding-channel` and more', inline: false },
           { name: '⚙️ Admin',                value: '`/setup` — interactive config menu', inline: false },
         ).setFooter({ text: 'HIGH-SPEED CONNECTION BOT · Made with 🖤' });
