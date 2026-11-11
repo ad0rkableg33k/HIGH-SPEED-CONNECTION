@@ -802,7 +802,6 @@ function buildMainMenuMessage() {
       { label: 'Speed Match',     description: 'Configure speed matching events',                  value: 'speedmatch',  emoji: '💨' },
       { label: 'Temp Roles',      description: 'VC presence roles and timed button roles',         value: 'temproles',   emoji: '🎭' },
       { label: 'Sticky Notes',    description: 'Messages that re-pin at the bottom of a channel', value: 'sticky',      emoji: '📌' },
-      { label: 'Auto Responder',  description: 'Auto-reply to trigger words or phrases',           value: 'autorespond', emoji: '🤖' },
       { label: 'Channel Index',   description: 'Exclusions & descriptions for /channel-index',    value: 'chindex',     emoji: '#️⃣' },
     );
   return { embeds: [embed], components: [new ActionRowBuilder().addComponents(moduleSelect)] };
@@ -1036,7 +1035,7 @@ client.on('interactionCreate', async (interaction) => {
       if (v === 'camera')     return interaction.update(buildCameraMenuMessage(guildId));
       if (v === 'speedmatch') return interaction.update(buildSpeedMatchSetupMessage(guildId));
       if (v === 'temproles')  return interaction.update(buildTempRolesSetupMessage(guildId));
-      if (v === 'sticky' || v === 'autorespond') return interaction.update(buildStickyARSetupMessage(guildId, v));
+      if (v === 'sticky') return interaction.update(buildStickySetupMessage(guildId));
       return;
     }
 
@@ -1178,25 +1177,6 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply({ content: `✅ Sticky set for <#${channelId}>!`, flags: MessageFlags.Ephemeral });
     }
 
-    if (id === 'setup:ar:add') {
-      const modal = new ModalBuilder().setCustomId('setup:ar:add:modal').setTitle('Add Auto Responder');
-      modal.addComponents(
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('trigger').setLabel('Trigger phrase').setStyle(TextInputStyle.Short).setRequired(true)),
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('matchType').setLabel('Match type: "contains" or "exact"').setStyle(TextInputStyle.Short).setRequired(true).setValue('contains')),
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('response').setLabel('Response message').setStyle(TextInputStyle.Paragraph).setRequired(true)),
-      );
-      return interaction.showModal(modal);
-    }
-    if (id === 'setup:ar:add:modal') {
-      const trigger = interaction.fields.getTextInputValue('trigger')?.trim();
-      const matchType = interaction.fields.getTextInputValue('matchType')?.trim().toLowerCase() === 'exact' ? 'exact' : 'contains';
-      const response = interaction.fields.getTextInputValue('response')?.trim();
-      if (!trigger || !response) return interaction.reply({ content: '❌ Trigger and response required.', flags: MessageFlags.Ephemeral });
-      const ar = await loadAR(); if (!ar[guildId]) ar[guildId] = [];
-      ar[guildId].push({ trigger, matchType, response }); await saveAR(ar);
-      return interaction.reply({ content: `✅ Auto responder added! Trigger: \`${trigger}\` (${matchType})`, flags: MessageFlags.Ephemeral });
-    }
-
   } catch (err) {
     console.error('[setup] interaction error:', err);
     try {
@@ -1239,12 +1219,11 @@ function buildTempRolesSetupMessage(guildId) {
   return { embeds: [embed], components: [row] };
 }
 
-function buildStickyARSetupMessage(guildId, mode) {
-  const isAR = mode === 'autorespond';
-  const embed = new EmbedBuilder().setColor(0x2b2d31).setTitle(isAR ? '🤖 Auto Responder — Setup' : '📌 Sticky Notes — Setup')
-    .setDescription((isAR ? 'Auto responders reply when a trigger is detected in any message.' : 'Sticky notes re-post at the bottom of a channel whenever someone sends a message.') + '\n\n> Manage all entries from the Dashboard.');
+function buildStickySetupMessage(guildId) {
+  const embed = new EmbedBuilder().setColor(0x2b2d31).setTitle('📌 Sticky Notes — Setup')
+    .setDescription('Sticky notes re-post at the bottom of a channel whenever someone sends a message.\n\n> Manage all entries from the Dashboard.');
   const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(isAR ? 'setup:ar:add' : 'setup:sticky:add').setLabel(isAR ? '➕ Add Auto Responder' : '➕ Add Sticky Note').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('setup:sticky:add').setLabel('➕ Add Sticky Note').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('setup:main').setLabel('⬅ Back').setStyle(ButtonStyle.Secondary),
   );
   return { embeds: [embed], components: [row] };
@@ -1843,7 +1822,6 @@ async function main() {
     loadVcShuffleConfig(),
     loadTR(),       // temp roles (was never loaded at startup)
     loadSticky(),   // sticky posts
-    loadAR(),       // auto responders
   ]);
   console.log('[startup] All configs loaded from MongoDB');
 
@@ -1909,42 +1887,14 @@ async function saveSticky(d) {
 }
 
 const stickyLastMsg = {};
-const STICKY_ENABLED = false; // set to true to turn sticky posts back on
 client.on('messageCreate', async msg => {
-  if (!STICKY_ENABLED) return;
-  if (msg.author.bot) return;
+  if (msg.author.bot || !msg.guildId) return;
   const gSticky = stickyCache[msg.guildId]; if (!gSticky) return;
   const entry = gSticky[msg.channelId]; if (!entry?.content) return;
   try {
     if (stickyLastMsg[msg.channelId]) { const old = await msg.channel.messages.fetch(stickyLastMsg[msg.channelId]).catch(()=>null); if (old) await old.delete().catch(()=>{}); }
     const sent = await msg.channel.send({ content:`📌 ${entry.content}` }); stickyLastMsg[msg.channelId] = sent.id;
   } catch {}
-});
-
-// ===========================================================================
-//  AUTO RESPONDERS
-// ===========================================================================
-let arCache = {};
-async function loadAR() {
-  const val = await dbGet('autoresponders');
-  arCache = val || {};
-  return arCache;
-}
-async function saveAR(d) {
-  arCache = d;
-  return dbSet('autoresponders', d);
-}
-
-const AUTORESPONDER_ENABLED = false; // set to true to turn auto responders back on
-client.on('messageCreate', async msg => {
-  if (!AUTORESPONDER_ENABLED) return;
-  if (msg.author.bot || !msg.guildId) return;
-  const gAR = arCache[msg.guildId]; if (!gAR?.length) return;
-  const lower = msg.content.toLowerCase();
-  for (const rule of gAR) {
-    const match = rule.matchType==='exact' ? lower===rule.trigger.toLowerCase() : lower.includes(rule.trigger.toLowerCase());
-    if (match) { await msg.channel.send(rule.response).catch(()=>{}); break; }
-  }
 });
 
 // ===========================================================================
@@ -2138,7 +2088,7 @@ function startWebServer() {
     const navItems = [
       ['/', 'Overview'], ['/camera', 'Camera Policy'], ['/camera/setup/1', '✨ Camera Setup (guided)'], ['/channel-index', 'Channel Index'],
       ['/speed-match', 'Speed Match'], ['/sticky', 'Sticky Posts'],
-      ['/autoresponder', 'Auto Responders'], ['/temproles', 'Temp Roles'],
+      ['/temproles', 'Temp Roles'],
     ];
     const sidebarLinks = navItems.map(([href, label]) =>
       `<a href="${href}${guildId ? '?guild='+guildId : ''}" ${currentPath === href ? 'class="active"' : ''}>${label}</a>`
@@ -2260,8 +2210,8 @@ ${DASH_CSS}
         </table>
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:1rem;">
-        ${[['Camera Policy','/camera'],['Channel Index','/channel-index'],['Speed Match','/speed-match'],['Sticky Posts','/sticky'],['Auto Responders','/autoresponder'],['Temp Roles','/temproles']]
-          .map(([label, href]) => `<a href="${href}?guild=${guildId}" style="text-decoration:none;"><div class="card" style="text-align:center;padding:1.25rem;cursor:pointer;" onmouseover="this.style.borderColor='var(--magenta)'" onmouseout="this.style.borderColor=''"><div style="font-size:1.5rem;margin-bottom:.5rem">${{'/camera':'📷','/channel-index':'📋','/speed-match':'💨','/sticky':'📌','/autoresponder':'🤖','/temproles':'🎭'}[href]}</div><div style="font-size:.8rem;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--muted)">${label}</div></div></a>`)
+        ${[['Camera Policy','/camera'],['Channel Index','/channel-index'],['Speed Match','/speed-match'],['Sticky Posts','/sticky'],['Temp Roles','/temproles']]
+          .map(([label, href]) => `<a href="${href}?guild=${guildId}" style="text-decoration:none;"><div class="card" style="text-align:center;padding:1.25rem;cursor:pointer;" onmouseover="this.style.borderColor='var(--magenta)'" onmouseout="this.style.borderColor=''"><div style="font-size:1.5rem;margin-bottom:.5rem">${{'/camera':'📷','/channel-index':'📋','/speed-match':'💨','/sticky':'📌','/temproles':'🎭'}[href]}</div><div style="font-size:.8rem;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--muted)">${label}</div></div></a>`)
           .join('')}
       </div>`;
     res.send(renderLayout({ title: 'Overview', guildId, currentPath: '/', allowedGuildIds, username: req.session.userTag, body }));
@@ -2892,54 +2842,6 @@ ${DASH_CSS}
     if (stickyCache[guildId]) delete stickyCache[guildId][req.body.channelId];
     await saveSticky(stickyCache);
     res.redirect(`/sticky?guild=${guildId}&flash=${encodeURIComponent('✅ Sticky post removed.')}`);
-  });
-
-  // ── auto responders ───────────────────────────────────────────────────
-  app.get('/autoresponder', async (req, res) => {
-    const guildId = resolveGuildId(req);
-    const allowedGuildIds = req.session.allowedGuildIds || [];
-    if (!guildId) return res.redirect('/');
-    const gAR = arCache[guildId] || [];
-    const flash = req.query.flash ? `<div class="flash ${req.query.flash.includes('❌')?'flash-err':'flash-ok'}">${decodeURIComponent(req.query.flash)}</div>` : '';
-    const rows = gAR.map((rule, i) => `<tr>
-      <td><code style="color:var(--magenta)">${rule.trigger.replace(/</g,'&lt;')}</code></td>
-      <td><span style="font-size:.74rem;background:var(--surface2);padding:.12rem .4rem;border-radius:3px;">${rule.matchType}</span></td>
-      <td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:.85rem;">${rule.response.replace(/</g,'&lt;')}</td>
-      <td><form method="POST" action="/autoresponder/delete?guild=${guildId}" style="display:inline"><input type="hidden" name="index" value="${i}"><button type="submit" class="btn btn-danger" style="padding:.25rem .6rem;font-size:.75rem;">🗑 Remove</button></form></td>
-    </tr>`).join('');
-    const body = `
-      <div class="page-title">AUTO RESPONDERS</div>
-      <div class="page-sub">Bot replies automatically when a trigger word or phrase is detected.</div>
-      ${flash}
-      <div class="card"><div class="card-title">Add Auto Responder</div>
-        <form method="POST" action="/autoresponder/save?guild=${guildId}">
-          <div class="form-row"><label>Trigger phrase</label><input type="text" name="trigger" placeholder="e.g. !rules"></div>
-          <div class="form-row"><label>Match type</label>
-            <select name="matchType"><option value="contains">Contains</option><option value="exact">Exact match</option></select>
-          </div>
-          <div class="form-row"><label>Response</label><textarea name="response" rows="3" placeholder="Bot's reply..."></textarea></div>
-          <button type="submit" class="btn btn-primary">➕ Add Responder</button>
-        </form>
-      </div>
-      ${rows ? `<div class="card"><div class="card-title">Active Responders (${gAR.length})</div><table><thead><tr><th>Trigger</th><th>Match</th><th>Response</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div>` : ''}`;
-    res.send(renderLayout({ title:'Auto Responders', guildId, currentPath:'/autoresponder', allowedGuildIds, username:req.session.userTag, body }));
-  });
-
-  app.post('/autoresponder/save', async (req, res) => {
-    const guildId = resolveGuildId(req); if (!guildId) return res.redirect('/');
-    const { trigger, matchType, response } = req.body;
-    if (!trigger?.trim() || !response?.trim()) return res.redirect(`/autoresponder?guild=${guildId}&flash=${encodeURIComponent('❌ Trigger and response are required.')}`);
-    if (!arCache[guildId]) arCache[guildId] = [];
-    arCache[guildId].push({ trigger: trigger.trim(), matchType: matchType||'contains', response: response.trim() });
-    await saveAR(arCache);
-    res.redirect(`/autoresponder?guild=${guildId}&flash=${encodeURIComponent('✅ Auto responder added.')}`);
-  });
-  app.post('/autoresponder/delete', async (req, res) => {
-    const guildId = resolveGuildId(req); if (!guildId) return res.redirect('/');
-    const idx = parseInt(req.body.index);
-    if (arCache[guildId]) arCache[guildId].splice(idx, 1);
-    await saveAR(arCache);
-    res.redirect(`/autoresponder?guild=${guildId}&flash=${encodeURIComponent('✅ Auto responder removed.')}`);
   });
 
   // ── temp roles ────────────────────────────────────────────────────────
