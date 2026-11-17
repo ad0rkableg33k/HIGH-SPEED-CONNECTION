@@ -801,6 +801,7 @@ function buildMainMenuMessage() {
       { label: 'Camera Policy — Quick Edit',   description: 'Change one camera setting at a time',      value: 'camera',      emoji: '📷' },
       { label: 'Speed Match',     description: 'Configure speed matching events',                  value: 'speedmatch',  emoji: '💨' },
       { label: 'Temp Roles',      description: 'VC presence roles and timed button roles',         value: 'temproles',   emoji: '🎭' },
+      { label: 'VC Passwords',   description: 'Password-lock regular voice channels',            value: 'vcpassword',  emoji: '🔐' },
       { label: 'Sticky Notes',    description: 'Messages that re-pin at the bottom of a channel', value: 'sticky',      emoji: '📌' },
       { label: 'Channel Index',   description: 'Exclusions & descriptions for /channel-index',    value: 'chindex',     emoji: '#️⃣' },
     );
@@ -1036,6 +1037,7 @@ client.on('interactionCreate', async (interaction) => {
       if (v === 'speedmatch') return interaction.update(buildSpeedMatchSetupMessage(guildId));
       if (v === 'temproles')  return interaction.update(buildTempRolesSetupMessage(guildId));
       if (v === 'sticky') return interaction.update(buildStickySetupMessage(guildId));
+      if (v === 'vcpassword') return interaction.update(buildVcPwSetupMessage(guildId));
       return;
     }
 
@@ -1342,6 +1344,452 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 // ===========================================================================
+//  VC PASSWORDS — password-protect regular (permanent) voice channels
+//  Uses only permissions the bot already has (Manage Channels -> permission
+//  overwrites). Access lasts until the member leaves the VC. The lock resets
+//  automatically when the person who set the password leaves the VC.
+// ===========================================================================
+const { OverwriteType } = require('discord.js');
+const vcPwScrypt = require('util').promisify(crypto.scrypt);
+
+const VCPW_GRANT_TTL_MS = 10 * 60 * 1000;  // unlocked but never joined -> revoked after 10 min
+const VCPW_MAX_ATTEMPTS = 5;               // wrong guesses before a cooldown
+const VCPW_COOLDOWN_MS  = 60 * 1000;
+
+let vcPwConfig = {};  // guildId -> { setterRoleIds: [], bypassRoleIds: [], panelChannelId }
+let vcPwLocks  = {};  // guildId -> { channelId -> { ownerId, salt, hash, createdAt, prev, granted[] } }
+
+async function loadVcPw() {
+  vcPwConfig = (await dbGet('vcpw_config')) || {};
+  vcPwLocks  = (await dbGet('vcpw_locks'))  || {};
+  const n = Object.values(vcPwLocks).reduce((a, g) => a + Object.keys(g).length, 0);
+  console.log(`[startup] vc-passwords: ${n} active lock(s) loaded`);
+}
+function saveVcPwConfig() { return dbSet('vcpw_config', vcPwConfig); }
+function saveVcPwLocks()  { return dbSet('vcpw_locks', vcPwLocks); }
+
+function vcPwGuildCfg(guildId) {
+  if (!vcPwConfig[guildId]) vcPwConfig[guildId] = { setterRoleIds: [], bypassRoleIds: [], panelChannelId: null };
+  const c = vcPwConfig[guildId];
+  if (!c.setterRoleIds) c.setterRoleIds = [];
+  if (!c.bypassRoleIds) c.bypassRoleIds = [];
+  if (c.panelChannelId === undefined) c.panelChannelId = null;
+  return c;
+}
+
+// One operation at a time per channel so lock / grant / revoke never race.
+const vcPwQueues = new Map();
+function vcPwQueue(key, fn) {
+  const prev = vcPwQueues.get(key) || Promise.resolve();
+  const next = prev.catch(() => {}).then(fn);
+  vcPwQueues.set(key, next);
+  next.finally(() => { if (vcPwQueues.get(key) === next) vcPwQueues.delete(key); }).catch(() => {});
+  return next;
+}
+
+const vcPwEph = (content) => ({ content, flags: MessageFlags.Ephemeral });
+
+function vcPwErrText(err) {
+  if (err?.code === 50013) return "I'm missing permission to edit that channel. I need **Manage Channels** there, and my role must be able to see the channel.";
+  return `Something went wrong: ${err?.message || err}`;
+}
+
+function vcPwCanSet(member) {
+  if (member.permissions.has(PermissionFlagsBits.ManageGuild)) return true;
+  const cfg = vcPwGuildCfg(member.guild.id);
+  return cfg.setterRoleIds.some(r => member.roles.cache.has(r));
+}
+
+// Speed Match lobbies / rooms are managed by the event system — never lock those.
+function vcPwChannelBlocked(guildId, channelId) {
+  const sc = vcShuffleConfig[guildId];
+  if (!sc) return false;
+  return (sc.lobbyChannelIds || []).includes(channelId) ||
+         (sc.createdChannelIds || []).includes(channelId) ||
+         (sc.cloudRoomIds || []).includes(channelId) ||
+         sc.holdingChannelId === channelId;
+}
+
+async function vcPwHash(password, salt) {
+  return (await vcPwScrypt(password, salt, 32)).toString('hex');
+}
+async function vcPwCheck(password, rec) {
+  const a = Buffer.from(await vcPwHash(password, rec.salt), 'hex');
+  const b = Buffer.from(rec.hash, 'hex');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+// ── permission-overwrite helpers ────────────────────────────────────────────
+// A "snapshot" remembers what an overwrite looked like before we touched it,
+// so unlocking puts the channel back exactly how it was.
+function vcPwSnapshot(channel, id) {
+  const ow = channel.permissionOverwrites.cache.get(id);
+  let state = null;
+  if (ow) {
+    if (ow.allow.has(PermissionFlagsBits.Connect)) state = true;
+    else if (ow.deny.has(PermissionFlagsBits.Connect)) state = false;
+  }
+  return { existed: !!ow, state };
+}
+
+async function vcPwRestoreOne(channel, id, type, prev, reason) {
+  if (!prev) return;
+  try {
+    if (!prev.existed) await channel.permissionOverwrites.delete(id, reason);
+    else await channel.permissionOverwrites.edit(id, { Connect: prev.state }, { type, reason });
+  } catch (err) {
+    if (err?.status !== 404 && err?.code !== 10065) console.error(`[vcpw] restore ${id} on ${channel.id}:`, err.message);
+  }
+}
+
+async function vcPwGrantConnect(channel, rec, userId) {
+  if (rec.granted.some(g => g.id === userId)) return;
+  const prev = vcPwSnapshot(channel, userId);
+  await channel.permissionOverwrites.edit(userId, { Connect: true }, { type: OverwriteType.Member, reason: '🔐 HSC: VC password access' });
+  rec.granted.push({ id: userId, prev, at: Date.now() });
+}
+
+async function vcPwApplyLock(guild, channel, rec) {
+  const cfg = vcPwGuildCfg(guild.id);
+  const reason = '🔐 HSC: VC password lock';
+  const botId = client.user.id;
+  const bypass = cfg.bypassRoleIds.filter(rid => guild.roles.cache.has(rid));
+
+  rec.prev = { everyone: vcPwSnapshot(channel, guild.id), bot: vcPwSnapshot(channel, botId), roles: {} };
+  for (const rid of bypass) rec.prev.roles[rid] = vcPwSnapshot(channel, rid);
+  rec.granted = [];
+
+  // Order matters: give the bot + staff + owner access BEFORE denying @everyone,
+  // otherwise the bot would lock itself out of granting access later.
+  await channel.permissionOverwrites.edit(botId, { Connect: true }, { type: OverwriteType.Member, reason });
+  for (const rid of bypass) await channel.permissionOverwrites.edit(rid, { Connect: true }, { type: OverwriteType.Role, reason });
+  await vcPwGrantConnect(channel, rec, rec.ownerId);
+  await channel.permissionOverwrites.edit(guild.id, { Connect: false }, { type: OverwriteType.Role, reason });
+}
+
+// Un-queued internals (callers wrap them in vcPwQueue).
+async function vcPwUnlockNow(guild, channelId, why) {
+  const rec = vcPwLocks[guild.id]?.[channelId];
+  if (!rec) return false;
+  const channel = guild.channels.cache.get(channelId) || await guild.channels.fetch(channelId).catch(() => null);
+  if (channel) {
+    const reason = `🔐 HSC: VC password lock removed (${why})`;
+    // Open the room first, then tidy up everything else.
+    await vcPwRestoreOne(channel, guild.id, OverwriteType.Role, rec.prev?.everyone, reason);
+    for (const g of rec.granted || []) await vcPwRestoreOne(channel, g.id, OverwriteType.Member, g.prev, reason);
+    for (const [rid, prev] of Object.entries(rec.prev?.roles || {})) await vcPwRestoreOne(channel, rid, OverwriteType.Role, prev, reason);
+    await vcPwRestoreOne(channel, client.user.id, OverwriteType.Member, rec.prev?.bot, reason);
+  }
+  delete vcPwLocks[guild.id][channelId];
+  if (!Object.keys(vcPwLocks[guild.id]).length) delete vcPwLocks[guild.id];
+  await saveVcPwLocks();
+  console.log(`[vcpw] guild ${guild.id}: unlocked ${channelId} (${why})`);
+  return true;
+}
+
+async function vcPwRevokeNow(guild, channelId, userId, why) {
+  const rec = vcPwLocks[guild.id]?.[channelId];
+  if (!rec) return false;
+  const i = rec.granted.findIndex(g => g.id === userId);
+  if (i < 0) return false;
+  const [g] = rec.granted.splice(i, 1);
+  const channel = guild.channels.cache.get(channelId);
+  if (channel) await vcPwRestoreOne(channel, userId, OverwriteType.Member, g.prev, `🔐 HSC: VC password access ended (${why})`);
+  await saveVcPwLocks();
+  return true;
+}
+
+const vcPwUnlock = (guild, channelId, why)         => vcPwQueue(channelId, () => vcPwUnlockNow(guild, channelId, why));
+const vcPwRevoke = (guild, channelId, userId, why) => vcPwQueue(channelId, () => vcPwRevokeNow(guild, channelId, userId, why));
+
+// ── UI builders ─────────────────────────────────────────────────────────────
+function vcPwPanelMessage() {
+  const embed = new EmbedBuilder().setColor(0x8a2be2).setTitle('🔐 Locked Voice Channels')
+    .setDescription(
+      'Some voice channels are password-protected by their host.\n\n' +
+      '**1.** Click **Enter Password** below\n' +
+      '**2.** Pick the voice channel (if more than one is locked)\n' +
+      '**3.** Type the password — only you will see it\n\n' +
+      "You'll be let in until you leave the channel. When the host leaves, the lock resets."
+    );
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('vcpw:enter').setLabel('🔑 Enter Password').setStyle(ButtonStyle.Primary),
+  );
+  return { embeds: [embed], components: [row] };
+}
+
+function vcPwModal(customId, title, label) {
+  const input = new TextInputBuilder().setCustomId('password').setLabel(label)
+    .setStyle(TextInputStyle.Short).setRequired(true).setMinLength(3).setMaxLength(64);
+  return new ModalBuilder().setCustomId(customId).setTitle(title).addComponents(new ActionRowBuilder().addComponents(input));
+}
+
+function buildVcPwSetupMessage(guildId) {
+  const cfg = vcPwGuildCfg(guildId);
+  const locked = Object.keys(vcPwLocks[guildId] || {}).length;
+  const embed = new EmbedBuilder().setColor(0x2b2d31).setTitle('🔐 VC Passwords — Setup')
+    .setDescription(
+      `**Roles that can set passwords:** ${cfg.setterRoleIds.length ? cfg.setterRoleIds.map(id => `<@&${id}>`).join(', ') : 'None (only Manage Server)'}\n` +
+      `**Staff roles that can always join locked VCs:** ${cfg.bypassRoleIds.length ? cfg.bypassRoleIds.map(id => `<@&${id}>`).join(', ') : 'None'}\n` +
+      `**Unlock panel channel:** ${cfg.panelChannelId ? `<#${cfg.panelChannelId}>` : 'Not posted yet'}\n` +
+      `**Locked right now:** ${locked}\n\n` +
+      '> **How it works:** a member with a setter role joins a regular voice channel and runs `/vc-password set`. ' +
+      'The bot denies **Connect** for @everyone on that channel. Others click **Enter Password** on the unlock panel; ' +
+      'a correct password lets them in until they leave. When the person who set the password leaves, the lock resets.\n' +
+      '> Members with Manage Server can always set passwords. Roles with Administrator, or with an explicit "Allow Connect" on a channel, can bypass a lock.'
+    );
+  const setters = new RoleSelectMenuBuilder().setCustomId('setup:vcpw:setters:select').setPlaceholder('Roles allowed to set passwords...').setMinValues(0).setMaxValues(25);
+  if (cfg.setterRoleIds.length) setters.setDefaultRoles(...cfg.setterRoleIds.slice(0, 25));
+  const bypass = new RoleSelectMenuBuilder().setCustomId('setup:vcpw:bypass:select').setPlaceholder('Staff roles that can always join locked VCs...').setMinValues(0).setMaxValues(25);
+  if (cfg.bypassRoleIds.length) bypass.setDefaultRoles(...cfg.bypassRoleIds.slice(0, 25));
+  const buttons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('setup:vcpw:panel').setLabel('📤 Post Unlock Panel Here').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('setup:main').setLabel('⬅ Back').setStyle(ButtonStyle.Secondary),
+  );
+  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(setters), new ActionRowBuilder().addComponents(bypass), buttons] };
+}
+
+// ── interaction handling ────────────────────────────────────────────────────
+const vcPwAttempts = new Map(); // `${guild}:${channel}:${user}` -> { fails, until }
+
+client.on('interactionCreate', async (interaction) => {
+  try {
+    if (interaction.isChatInputCommand() && interaction.commandName === 'vc-password') return await vcPwHandleCommand(interaction);
+    if (interaction.isButton() && interaction.customId === 'vcpw:enter') return await vcPwHandleEnterButton(interaction);
+    if (interaction.isStringSelectMenu() && interaction.customId === 'vcpw:pick') return await vcPwHandlePick(interaction);
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('vcpw:setmodal:')) return await vcPwHandleSetModal(interaction);
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('vcpw:entermodal:')) return await vcPwHandleEnterModal(interaction);
+    if (interaction.customId?.startsWith('setup:vcpw:')) return await vcPwHandleSetup(interaction);
+  } catch (err) {
+    console.error('[vcpw] interaction error:', err);
+    try {
+      const msg = vcPwEph(`❌ ${vcPwErrText(err)}`);
+      if (interaction.deferred || interaction.replied) await interaction.followUp(msg);
+      else await interaction.reply(msg);
+    } catch {}
+  }
+});
+
+async function vcPwHandleSetup(interaction) {
+  const guildId = interaction.guildId; const id = interaction.customId;
+  if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) return interaction.reply(vcPwEph('❌ Manage Server is required.'));
+  const cfg = vcPwGuildCfg(guildId);
+  if (id === 'setup:vcpw:setters:select' && interaction.isRoleSelectMenu()) {
+    cfg.setterRoleIds = interaction.values; await saveVcPwConfig();
+    return interaction.update(buildVcPwSetupMessage(guildId));
+  }
+  if (id === 'setup:vcpw:bypass:select' && interaction.isRoleSelectMenu()) {
+    cfg.bypassRoleIds = interaction.values; await saveVcPwConfig();
+    return interaction.update(buildVcPwSetupMessage(guildId));
+  }
+  if (id === 'setup:vcpw:panel' && interaction.isButton()) {
+    await interaction.channel.send(vcPwPanelMessage());
+    cfg.panelChannelId = interaction.channelId; await saveVcPwConfig();
+    return interaction.reply(vcPwEph(`✅ Unlock panel posted in <#${interaction.channelId}>.`));
+  }
+}
+
+async function vcPwHandleCommand(interaction) {
+  const guild = interaction.guild;
+  if (!guild) return interaction.reply(vcPwEph('❌ This only works in a server.'));
+  const member = interaction.member; const sub = interaction.options.getSubcommand();
+  const isAdmin = member.permissions.has(PermissionFlagsBits.ManageGuild);
+
+  if (sub === 'set') {
+    if (!vcPwCanSet(member)) return interaction.reply(vcPwEph('❌ You need a password-setter role (or Manage Server) to lock a voice channel.'));
+    const ch = member.voice?.channel;
+    if (!ch || ch.type !== ChannelType.GuildVoice) return interaction.reply(vcPwEph('🔊 Join the voice channel you want to lock first, then run this again.'));
+    if (vcPwChannelBlocked(guild.id, ch.id)) return interaction.reply(vcPwEph("❌ That channel is used by Speed Match and can't be password-locked."));
+    const rec = vcPwLocks[guild.id]?.[ch.id];
+    if (rec && rec.ownerId !== member.id && !isAdmin) return interaction.reply(vcPwEph(`🔒 <#${ch.id}> is already locked by <@${rec.ownerId}>.`));
+    if (!guild.members.me.permissions.has(PermissionFlagsBits.ManageChannels)) return interaction.reply(vcPwEph('❌ I need the **Manage Channels** permission to lock a channel.'));
+    return interaction.showModal(vcPwModal(`vcpw:setmodal:${ch.id}`, 'Set Voice Channel Password', 'Password (case-sensitive)'));
+  }
+
+  if (sub === 'clear') {
+    const target = interaction.options.getChannel('channel') || member.voice?.channel;
+    if (!target) return interaction.reply(vcPwEph('🔊 Join the locked voice channel or pick one with the `channel` option.'));
+    const rec = vcPwLocks[guild.id]?.[target.id];
+    if (!rec) return interaction.reply(vcPwEph(`<#${target.id}> isn't locked.`));
+    if (rec.ownerId !== member.id && !isAdmin) return interaction.reply(vcPwEph('❌ Only the person who set the password (or someone with Manage Server) can remove it.'));
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    await vcPwUnlock(guild, target.id, 'cleared by command');
+    return interaction.editReply(`🔓 <#${target.id}> is unlocked again.`);
+  }
+
+  if (sub === 'status') {
+    if (!isAdmin) return interaction.reply(vcPwEph('❌ Manage Server is required.'));
+    const locks = vcPwLocks[guild.id] || {};
+    const lines = Object.entries(locks).map(([chId, r]) => `🔒 <#${chId}> — host <@${r.ownerId}> — ${Math.max(0, r.granted.length - 1)} unlocked`);
+    return interaction.reply(vcPwEph(lines.length ? lines.join('\n').slice(0, 1900) : 'No voice channels are locked right now.'));
+  }
+
+  if (sub === 'panel') {
+    if (!isAdmin) return interaction.reply(vcPwEph('❌ Manage Server is required.'));
+    await interaction.channel.send(vcPwPanelMessage());
+    const cfg = vcPwGuildCfg(guild.id); cfg.panelChannelId = interaction.channelId; await saveVcPwConfig();
+    return interaction.reply(vcPwEph(`✅ Unlock panel posted in <#${interaction.channelId}>.`));
+  }
+}
+
+async function vcPwHandleSetModal(interaction) {
+  const channelId = interaction.customId.split(':')[2];
+  const guild = interaction.guild; const member = interaction.member;
+  const password = interaction.fields.getTextInputValue('password').trim();
+  if (password.length < 3) return interaction.reply(vcPwEph('❌ Passwords need at least 3 characters.'));
+  if (member.voice?.channelId !== channelId) return interaction.reply(vcPwEph('🔊 You need to still be in that voice channel to lock it.'));
+  if (!vcPwCanSet(member)) return interaction.reply(vcPwEph('❌ You need a password-setter role (or Manage Server).'));
+  const channel = guild.channels.cache.get(channelId);
+  if (!channel) return interaction.reply(vcPwEph("❌ I can't find that channel."));
+  const isAdmin = member.permissions.has(PermissionFlagsBits.ManageGuild);
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = await vcPwHash(password, salt);
+
+  let changed = false;
+  try {
+    await vcPwQueue(channelId, async () => {
+      const existing = vcPwLocks[guild.id]?.[channelId];
+      if (existing) {
+        if (existing.ownerId !== member.id && !isAdmin) throw new Error('That channel is already locked by someone else.');
+        existing.salt = salt; existing.hash = hash; changed = true;
+        if (existing.ownerId !== member.id) { existing.ownerId = member.id; await vcPwGrantConnect(channel, existing, member.id); }
+        await saveVcPwLocks();
+        return;
+      }
+      const rec = { ownerId: member.id, salt, hash, createdAt: Date.now(), prev: null, granted: [] };
+      if (!vcPwLocks[guild.id]) vcPwLocks[guild.id] = {};
+      vcPwLocks[guild.id][channelId] = rec;      // register first so a failed lock can be rolled back
+      try { await vcPwApplyLock(guild, channel, rec); }
+      catch (err) { await vcPwUnlockNow(guild, channelId, 'lock failed — rolled back').catch(() => {}); throw err; }
+      await saveVcPwLocks();
+    });
+  } catch (err) {
+    console.error('[vcpw] set failed:', err);
+    return interaction.editReply(`❌ ${vcPwErrText(err)}`);
+  }
+
+  const panelId = vcPwGuildCfg(guild.id).panelChannelId;
+  return interaction.editReply(
+    (changed ? `🔑 Password for <#${channelId}> updated.` : `🔐 <#${channelId}> is now **locked**.`) +
+    `\nPeople already inside can stay. Everyone else enters the password ${panelId ? `at <#${panelId}>` : 'on the unlock panel (ask an admin to run `/vc-password panel`)'}.` +
+    `\n**When you leave this voice channel, the lock resets.**`
+  );
+}
+
+async function vcPwHandleEnterButton(interaction) {
+  const guild = interaction.guild;
+  const ids = Object.keys(vcPwLocks[guild.id] || {}).filter(id => guild.channels.cache.has(id));
+  if (!ids.length) return interaction.reply(vcPwEph('🔓 No voice channels are locked right now.'));
+  if (ids.length === 1) {
+    return interaction.showModal(vcPwModal(`vcpw:entermodal:${ids[0]}`, 'Unlock Voice Channel', 'Password'));
+  }
+  const options = ids.slice(0, 25).map(id => {
+    const ch = guild.channels.cache.get(id);
+    return { label: `🔒 ${ch.name}`.slice(0, 100), value: id, description: (ch.parent?.name || 'No category').slice(0, 100) };
+  });
+  const menu = new StringSelectMenuBuilder().setCustomId('vcpw:pick').setPlaceholder('Which voice channel?').addOptions(options);
+  return interaction.reply({ content: 'Pick the voice channel you want to join:', components: [new ActionRowBuilder().addComponents(menu)], flags: MessageFlags.Ephemeral });
+}
+
+async function vcPwHandlePick(interaction) {
+  const channelId = interaction.values[0];
+  if (!vcPwLocks[interaction.guildId]?.[channelId]) return interaction.update({ content: "🔓 That channel isn't locked anymore.", components: [] });
+  return interaction.showModal(vcPwModal(`vcpw:entermodal:${channelId}`, 'Unlock Voice Channel', 'Password'));
+}
+
+async function vcPwHandleEnterModal(interaction) {
+  const channelId = interaction.customId.split(':')[2];
+  const guild = interaction.guild; const userId = interaction.user.id;
+  const password = interaction.fields.getTextInputValue('password').trim();
+  const rec = vcPwLocks[guild.id]?.[channelId];
+  const channel = guild.channels.cache.get(channelId);
+  if (!rec || !channel) return interaction.reply(vcPwEph("🔓 That channel isn't locked anymore."));
+
+  const key = `${guild.id}:${channelId}:${userId}`;
+  const att = vcPwAttempts.get(key) || { fails: 0, until: 0 };
+  if (Date.now() < att.until) return interaction.reply(vcPwEph(`⏳ Too many wrong guesses. Try again in ${Math.ceil((att.until - Date.now()) / 1000)}s.`));
+
+  if (!(await vcPwCheck(password, rec))) {
+    att.fails += 1;
+    if (att.fails >= VCPW_MAX_ATTEMPTS) { att.fails = 0; att.until = Date.now() + VCPW_COOLDOWN_MS; }
+    vcPwAttempts.set(key, att);
+    return interaction.reply(vcPwEph('❌ Wrong password.'));
+  }
+  vcPwAttempts.delete(key);
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  try {
+    await vcPwQueue(channelId, async () => {
+      const cur = vcPwLocks[guild.id]?.[channelId];
+      if (!cur) throw new Error('That channel was just unlocked.');
+      await vcPwGrantConnect(channel, cur, userId);
+      await saveVcPwLocks();
+    });
+  } catch (err) {
+    console.error('[vcpw] grant failed:', err);
+    return interaction.editReply(`❌ ${vcPwErrText(err)}`);
+  }
+  return interaction.editReply(`✅ Unlocked! Join <#${channelId}> now. Your access ends when you leave the channel.`);
+}
+
+// ── automatic cleanup ───────────────────────────────────────────────────────
+client.on('voiceStateUpdate', async (oldState, newState) => {
+  try {
+    if (!oldState.channelId || oldState.channelId === newState.channelId) return; // not a leave / move
+    const guild = oldState.guild;
+    const rec = vcPwLocks[guild.id]?.[oldState.channelId];
+    if (!rec) return;
+    const userId = oldState.id;
+    if (userId === rec.ownerId) await vcPwUnlock(guild, oldState.channelId, 'host left');
+    else if (rec.granted.some(g => g.id === userId)) await vcPwRevoke(guild, oldState.channelId, userId, 'left channel');
+  } catch (err) { console.error('[vcpw] voiceStateUpdate:', err.message); }
+});
+
+client.on('guildMemberRemove', async (member) => {
+  try {
+    const locks = vcPwLocks[member.guild.id]; if (!locks) return;
+    for (const [channelId, rec] of Object.entries({ ...locks })) {
+      if (rec.ownerId === member.id) await vcPwUnlock(member.guild, channelId, 'host left the server');
+      else if (rec.granted.some(g => g.id === member.id)) await vcPwRevoke(member.guild, channelId, member.id, 'left the server');
+    }
+  } catch (err) { console.error('[vcpw] guildMemberRemove:', err.message); }
+});
+
+client.on('channelDelete', async (channel) => {
+  try {
+    if (!channel.guildId || !vcPwLocks[channel.guildId]?.[channel.id]) return;
+    delete vcPwLocks[channel.guildId][channel.id];
+    if (!Object.keys(vcPwLocks[channel.guildId]).length) delete vcPwLocks[channel.guildId];
+    await saveVcPwLocks();
+  } catch (err) { console.error('[vcpw] channelDelete:', err.message); }
+});
+
+// Safety net: runs shortly after startup and then every minute. Catches a host who
+// left while the bot was offline, and unlocked members who never actually joined.
+async function vcPwSweep() {
+  for (const [guildId, locks] of Object.entries({ ...vcPwLocks })) {
+    const guild = client.guilds.cache.get(guildId); if (!guild) continue;
+    for (const [channelId, rec] of Object.entries({ ...locks })) {
+      try {
+        const channel = guild.channels.cache.get(channelId);
+        if (!channel) { await vcPwQueue(channelId, async () => { delete vcPwLocks[guildId]?.[channelId]; if (vcPwLocks[guildId] && !Object.keys(vcPwLocks[guildId]).length) delete vcPwLocks[guildId]; await saveVcPwLocks(); }); continue; }
+        if (!channel.members.has(rec.ownerId)) { await vcPwUnlock(guild, channelId, 'host not in channel'); continue; }
+        for (const g of [...rec.granted]) {
+          if (g.id === rec.ownerId || channel.members.has(g.id)) continue;
+          if (Date.now() - g.at > VCPW_GRANT_TTL_MS) await vcPwRevoke(guild, channelId, g.id, 'never joined');
+        }
+      } catch (err) { console.error(`[vcpw] sweep ${channelId}:`, err.message); }
+    }
+  }
+}
+function startVcPwSweeper() {
+  setTimeout(() => vcPwSweep().catch(() => {}), 20 * 1000);
+  setInterval(() => vcPwSweep().catch(() => {}), 60 * 1000);
+}
+
+// ===========================================================================
 //  SLASH COMMANDS REGISTRATION
 // ===========================================================================
 const commands = [
@@ -1413,6 +1861,12 @@ const commands = [
       .addStringOption(opt => opt.setName('mode').setDescription('Mode').setRequired(true)
         .addChoices({ name: 'Standard (1-on-1 anti-repeat)', value: 'standard' }, { name: 'Role-Based (pools)', value: 'role-based' })))
     .addSubcommand(sub => sub.setName('set-holding-channel').setDescription('VC where skipped members wait until the bell').addChannelOption(opt => opt.setName('channel').setDescription('Voice channel').setRequired(true))),
+  new SlashCommandBuilder().setName('vc-password').setDescription('Password-protect a regular voice channel')
+    .addSubcommand(sub => sub.setName('set').setDescription('Lock the voice channel you are in with a password (setter roles / Manage Server)'))
+    .addSubcommand(sub => sub.setName('clear').setDescription('Remove the password from a voice channel')
+      .addChannelOption(opt => opt.setName('channel').setDescription('Voice channel (defaults to the one you are in)').addChannelTypes(ChannelType.GuildVoice).setRequired(false)))
+    .addSubcommand(sub => sub.setName('status').setDescription('List locked voice channels (Manage Server)'))
+    .addSubcommand(sub => sub.setName('panel').setDescription('Post the Enter Password panel in this channel (Manage Server)')),
 ].map(cmd => cmd.toJSON());
 
 async function registerCommands() {
@@ -1434,6 +1888,7 @@ client.on('interactionCreate', async (interaction) => {
           { name: '# Channel Index',         value: '`/channel-index` `/export-channels`', inline: false },
           { name: '📷 Camera Policy',        value: '`/camera-setup` (guided walkthrough) · `/camera-policy` `/camera-status` `/camera-monitor` `/camera-exempt-role` `/camera-timing` `/camera-announcement`', inline: false },
           { name: '💨 High-Speed Connection',value: '`/speed-match start/stop/status/shuffle-now/end-session`\n`/speed-match set-connection-mode` `/speed-match set-holding-channel` and more', inline: false },
+          { name: '🔐 VC Passwords',         value: '`/vc-password set` (lock the VC you are in) · `/vc-password clear` · `/vc-password status` · `/vc-password panel`', inline: false },
           { name: '⚙️ Admin',                value: '`/setup` — interactive config menu', inline: false },
         ).setFooter({ text: 'HIGH-SPEED CONNECTION BOT · Made with 🖤' });
       return interaction.reply({ embeds: [embed] });
@@ -1822,12 +2277,14 @@ async function main() {
     loadVcShuffleConfig(),
     loadTR(),       // temp roles (was never loaded at startup)
     loadSticky(),   // sticky posts
+    loadVcPw(),     // vc passwords (config + active locks)
   ]);
   console.log('[startup] All configs loaded from MongoDB');
 
   client.once('clientReady', async () => {
     console.log(`[startup] Logged in as ${client.user.tag}`);
     await registerCommands();
+    startVcPwSweeper();
     const guild = await client.guilds.fetch(GUILD_ID).catch(() => null);
     if (guild) {
       await guild.channels.fetch().catch(() => {});
