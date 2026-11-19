@@ -1356,7 +1356,7 @@ const VCPW_GRANT_TTL_MS = 10 * 60 * 1000;  // unlocked but never joined -> revok
 const VCPW_MAX_ATTEMPTS = 5;               // wrong guesses before a cooldown
 const VCPW_COOLDOWN_MS  = 60 * 1000;
 
-let vcPwConfig = {};  // guildId -> { setterRoleIds: [], bypassRoleIds: [], panelChannelId }
+let vcPwConfig = {};  // guildId -> { setterRoleIds: [], bypassRoleIds: [], lockRoleIds: [], panelChannelId }
 let vcPwLocks  = {};  // guildId -> { channelId -> { ownerId, salt, hash, createdAt, prev, granted[] } }
 
 async function loadVcPw() {
@@ -1369,10 +1369,11 @@ function saveVcPwConfig() { return dbSet('vcpw_config', vcPwConfig); }
 function saveVcPwLocks()  { return dbSet('vcpw_locks', vcPwLocks); }
 
 function vcPwGuildCfg(guildId) {
-  if (!vcPwConfig[guildId]) vcPwConfig[guildId] = { setterRoleIds: [], bypassRoleIds: [], panelChannelId: null };
+  if (!vcPwConfig[guildId]) vcPwConfig[guildId] = { setterRoleIds: [], bypassRoleIds: [], lockRoleIds: [], panelChannelId: null };
   const c = vcPwConfig[guildId];
   if (!c.setterRoleIds) c.setterRoleIds = [];
   if (!c.bypassRoleIds) c.bypassRoleIds = [];
+  if (!c.lockRoleIds) c.lockRoleIds = [];
   if (c.panelChannelId === undefined) c.panelChannelId = null;
   return c;
 }
@@ -1454,16 +1455,22 @@ async function vcPwApplyLock(guild, channel, rec) {
   const reason = '🔐 HSC: VC password lock';
   const botId = client.user.id;
   const bypass = cfg.bypassRoleIds.filter(rid => guild.roles.cache.has(rid));
+  // Member roles (e.g. Verified) that get Connect from a role overwrite would walk past an @everyone deny,
+  // so they are denied directly too. A staff bypass role always wins over a lock role.
+  const lockRoles = cfg.lockRoleIds.filter(rid => rid !== guild.id && guild.roles.cache.has(rid) && !bypass.includes(rid));
 
-  rec.prev = { everyone: vcPwSnapshot(channel, guild.id), bot: vcPwSnapshot(channel, botId), roles: {} };
+  rec.prev = { everyone: vcPwSnapshot(channel, guild.id), bot: vcPwSnapshot(channel, botId), roles: {}, lockRoles: {} };
   for (const rid of bypass) rec.prev.roles[rid] = vcPwSnapshot(channel, rid);
+  for (const rid of lockRoles) rec.prev.lockRoles[rid] = vcPwSnapshot(channel, rid);
   rec.granted = [];
 
   // Order matters: give the bot + staff + owner access BEFORE denying @everyone,
   // otherwise the bot would lock itself out of granting access later.
+  // Then deny the member roles, and @everyone last.
   await channel.permissionOverwrites.edit(botId, { Connect: true }, { type: OverwriteType.Member, reason });
   for (const rid of bypass) await channel.permissionOverwrites.edit(rid, { Connect: true }, { type: OverwriteType.Role, reason });
   await vcPwGrantConnect(channel, rec, rec.ownerId);
+  for (const rid of lockRoles) await channel.permissionOverwrites.edit(rid, { Connect: false }, { type: OverwriteType.Role, reason });
   await channel.permissionOverwrites.edit(guild.id, { Connect: false }, { type: OverwriteType.Role, reason });
 }
 
@@ -1478,6 +1485,7 @@ async function vcPwUnlockNow(guild, channelId, why) {
     await vcPwRestoreOne(channel, guild.id, OverwriteType.Role, rec.prev?.everyone, reason);
     for (const g of rec.granted || []) await vcPwRestoreOne(channel, g.id, OverwriteType.Member, g.prev, reason);
     for (const [rid, prev] of Object.entries(rec.prev?.roles || {})) await vcPwRestoreOne(channel, rid, OverwriteType.Role, prev, reason);
+    for (const [rid, prev] of Object.entries(rec.prev?.lockRoles || {})) await vcPwRestoreOne(channel, rid, OverwriteType.Role, prev, reason);
     await vcPwRestoreOne(channel, client.user.id, OverwriteType.Member, rec.prev?.bot, reason);
   }
   delete vcPwLocks[guild.id][channelId];
@@ -1530,23 +1538,26 @@ function buildVcPwSetupMessage(guildId) {
   const embed = new EmbedBuilder().setColor(0x2b2d31).setTitle('🔐 VC Passwords — Setup')
     .setDescription(
       `**Roles that can set passwords:** ${cfg.setterRoleIds.length ? cfg.setterRoleIds.map(id => `<@&${id}>`).join(', ') : 'None (only Manage Server)'}\n` +
+      `**Member roles to lock (e.g. Verified):** ${cfg.lockRoleIds.length ? cfg.lockRoleIds.map(id => `<@&${id}>`).join(', ') : 'None (@everyone only)'}\n` +
       `**Staff roles that can always join locked VCs:** ${cfg.bypassRoleIds.length ? cfg.bypassRoleIds.map(id => `<@&${id}>`).join(', ') : 'None'}\n` +
       `**Unlock panel channel:** ${cfg.panelChannelId ? `<#${cfg.panelChannelId}>` : 'Not posted yet'}\n` +
       `**Locked right now:** ${locked}\n\n` +
       '> **How it works:** a member with a setter role joins a regular voice channel and runs `/vc-password set`. ' +
       'The bot denies **Connect** for @everyone on that channel. Others click **Enter Password** on the unlock panel; ' +
       'a correct password lets them in until they leave. When the person who set the password leaves, the lock resets.\n' +
-      '> Members with Manage Server can always set passwords. Roles with Administrator, or with an explicit "Allow Connect" on a channel, can bypass a lock.'
+      '> If your members get into voice through a role like **Verified**, pick it under *Member roles to lock* so it gets locked too. Members with Manage Server can always set passwords. Administrators, and staff roles you pick below, can always join.'
     );
   const setters = new RoleSelectMenuBuilder().setCustomId('setup:vcpw:setters:select').setPlaceholder('Roles allowed to set passwords...').setMinValues(0).setMaxValues(25);
   if (cfg.setterRoleIds.length) setters.setDefaultRoles(...cfg.setterRoleIds.slice(0, 25));
+  const lockSel = new RoleSelectMenuBuilder().setCustomId('setup:vcpw:lock:select').setPlaceholder('Member roles to lock, e.g. Verified...').setMinValues(0).setMaxValues(25);
+  if (cfg.lockRoleIds.length) lockSel.setDefaultRoles(...cfg.lockRoleIds.slice(0, 25));
   const bypass = new RoleSelectMenuBuilder().setCustomId('setup:vcpw:bypass:select').setPlaceholder('Staff roles that can always join locked VCs...').setMinValues(0).setMaxValues(25);
   if (cfg.bypassRoleIds.length) bypass.setDefaultRoles(...cfg.bypassRoleIds.slice(0, 25));
   const buttons = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('setup:vcpw:panel').setLabel('📤 Post Unlock Panel Here').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('setup:main').setLabel('⬅ Back').setStyle(ButtonStyle.Secondary),
   );
-  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(setters), new ActionRowBuilder().addComponents(bypass), buttons] };
+  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(setters), new ActionRowBuilder().addComponents(lockSel), new ActionRowBuilder().addComponents(bypass), buttons] };
 }
 
 // ── interaction handling ────────────────────────────────────────────────────
@@ -1576,6 +1587,10 @@ async function vcPwHandleSetup(interaction) {
   const cfg = vcPwGuildCfg(guildId);
   if (id === 'setup:vcpw:setters:select' && interaction.isRoleSelectMenu()) {
     cfg.setterRoleIds = interaction.values; await saveVcPwConfig();
+    return interaction.update(buildVcPwSetupMessage(guildId));
+  }
+  if (id === 'setup:vcpw:lock:select' && interaction.isRoleSelectMenu()) {
+    cfg.lockRoleIds = interaction.values; await saveVcPwConfig();
     return interaction.update(buildVcPwSetupMessage(guildId));
   }
   if (id === 'setup:vcpw:bypass:select' && interaction.isRoleSelectMenu()) {
@@ -2545,7 +2560,7 @@ function startWebServer() {
     const navItems = [
       ['/', 'Overview'], ['/camera', 'Camera Policy'], ['/camera/setup/1', '✨ Camera Setup (guided)'], ['/channel-index', 'Channel Index'],
       ['/speed-match', 'Speed Match'], ['/sticky', 'Sticky Posts'],
-      ['/temproles', 'Temp Roles'],
+      ['/temproles', 'Temp Roles'], ['/vc-password', '🔐 VC Passwords'],
     ];
     const sidebarLinks = navItems.map(([href, label]) =>
       `<a href="${href}${guildId ? '?guild='+guildId : ''}" ${currentPath === href ? 'class="active"' : ''}>${label}</a>`
@@ -2667,8 +2682,8 @@ ${DASH_CSS}
         </table>
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:1rem;">
-        ${[['Camera Policy','/camera'],['Channel Index','/channel-index'],['Speed Match','/speed-match'],['Sticky Posts','/sticky'],['Temp Roles','/temproles']]
-          .map(([label, href]) => `<a href="${href}?guild=${guildId}" style="text-decoration:none;"><div class="card" style="text-align:center;padding:1.25rem;cursor:pointer;" onmouseover="this.style.borderColor='var(--magenta)'" onmouseout="this.style.borderColor=''"><div style="font-size:1.5rem;margin-bottom:.5rem">${{'/camera':'📷','/channel-index':'📋','/speed-match':'💨','/sticky':'📌','/temproles':'🎭'}[href]}</div><div style="font-size:.8rem;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--muted)">${label}</div></div></a>`)
+        ${[['Camera Policy','/camera'],['Channel Index','/channel-index'],['Speed Match','/speed-match'],['Sticky Posts','/sticky'],['Temp Roles','/temproles'],['VC Passwords','/vc-password']]
+          .map(([label, href]) => `<a href="${href}?guild=${guildId}" style="text-decoration:none;"><div class="card" style="text-align:center;padding:1.25rem;cursor:pointer;" onmouseover="this.style.borderColor='var(--magenta)'" onmouseout="this.style.borderColor=''"><div style="font-size:1.5rem;margin-bottom:.5rem">${{'/camera':'📷','/channel-index':'📋','/speed-match':'💨','/sticky':'📌','/temproles':'🎭','/vc-password':'🔐'}[href]}</div><div style="font-size:.8rem;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--muted)">${label}</div></div></a>`)
           .join('')}
       </div>`;
     res.send(renderLayout({ title: 'Overview', guildId, currentPath: '/', allowedGuildIds, username: req.session.userTag, body }));
@@ -3426,6 +3441,127 @@ ${DASH_CSS}
     if (tempRolesCache[guildId]?.timedRoles) tempRolesCache[guildId].timedRoles.splice(idx, 1);
     await saveTR(tempRolesCache);
     res.redirect(`/temproles?guild=${guildId}&flash=${encodeURIComponent('✅ Timed role removed.')}`);
+  });
+
+  // ── vc passwords ──────────────────────────────────────────────────────
+  const vcEsc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const vcToArray = (v) => (v ? (Array.isArray(v) ? v : [v]) : []);
+
+  app.get('/vc-password', (req, res) => {
+    const guildId = resolveGuildId(req);
+    const allowedGuildIds = req.session.allowedGuildIds || [];
+    if (!guildId) return res.redirect('/');
+    const guild = client.guilds.cache.get(guildId);
+    const cfg = vcPwGuildCfg(guildId);
+    const flash = req.query.flash ? `<div class="flash ${req.query.flash.includes('❌') ? 'flash-err' : 'flash-ok'}">${vcEsc(req.query.flash)}</div>` : '';
+    const roles = guild ? [...guild.roles.cache.values()].filter(r => r.id !== guild.id).sort((a, b) => b.position - a.position) : [];
+    const textChannels = guild ? [...guild.channels.cache.values()].filter(c => c.type === ChannelType.GuildText).sort((a, b) => a.name.localeCompare(b.name)) : [];
+
+    const roleList = (listId, field, selected) => `
+      <input type="text" placeholder="Search roles..." oninput="vcFilter(this,'${listId}')" style="margin-bottom:.4rem;">
+      <div id="${listId}" style="max-height:190px;overflow-y:auto;border:1px solid var(--border);border-radius:4px;background:var(--surface2);">
+        ${roles.map(r => `<label style="display:flex;align-items:center;gap:.6rem;padding:.35rem .75rem;font-size:.84rem;cursor:pointer;">
+          <input type="checkbox" name="${field}" value="${r.id}" ${selected.includes(r.id) ? 'checked' : ''}> @${vcEsc(r.name)}
+        </label>`).join('') || '<div style="padding:.6rem .75rem;color:var(--muted);font-size:.82rem;">No roles found.</div>'}
+      </div>`;
+
+    const locks = Object.entries(vcPwLocks[guildId] || {});
+    const lockRows = locks.map(([chId, rec]) => {
+      const ch = guild?.channels.cache.get(chId);
+      const host = guild?.members.cache.get(rec.ownerId);
+      const others = Math.max(0, (rec.granted || []).filter(g => g.id !== rec.ownerId).length);
+      return `<tr>
+        <td>🔒 ${vcEsc(ch?.name || chId)}${ch?.parent ? ` <span style="color:var(--muted);font-size:.75rem;">(${vcEsc(ch.parent.name)})</span>` : ''}</td>
+        <td>${vcEsc(host?.displayName || rec.ownerId)}</td>
+        <td>${others}</td>
+        <td><form method="POST" action="/vc-password/clear?guild=${guildId}"><input type="hidden" name="channelId" value="${chId}"><button type="submit" class="btn btn-danger" style="padding:.2rem .6rem;font-size:.75rem;">🔓 Unlock</button></form></td>
+      </tr>`;
+    }).join('');
+
+    const body = `
+      <script>function vcFilter(inp,id){const v=inp.value.toLowerCase();document.querySelectorAll('#'+id+' label').forEach(l=>{l.style.display=l.textContent.toLowerCase().includes(v)?'':'none';});}</script>
+      <div class="page-title">VC PASSWORDS</div>
+      <div class="page-sub">Password-lock regular voice channels. A member with a setter role joins the VC and runs <code>/vc-password set</code>; when they leave, the lock resets.</div>
+      ${flash}
+
+      <div class="card">
+        <div class="card-title">Locked Right Now (${locks.length})</div>
+        ${lockRows
+          ? `<table><thead><tr><th>Voice channel</th><th>Host</th><th>Unlocked members</th><th></th></tr></thead><tbody>${lockRows}</tbody></table>`
+          : '<p style="color:var(--muted);font-size:.9rem;">No voice channels are locked right now.</p>'}
+      </div>
+
+      <form method="POST" action="/vc-password/save?guild=${guildId}">
+        <div class="card">
+          <div class="card-title">Who Can Set Passwords</div>
+          <p style="font-size:.78rem;color:var(--muted);margin-bottom:.75rem;">Members with these roles can run <code>/vc-password set</code>. Anyone with Manage Server always can.</p>
+          <div class="form-row">${roleList('vcpw-setters', 'setterRoleIds', cfg.setterRoleIds)}</div>
+        </div>
+        <div class="card">
+          <div class="card-title">Member Roles To Lock (e.g. Verified)</div>
+          <p style="font-size:.78rem;color:var(--muted);margin-bottom:.75rem;">If your members get into voice through a role like <strong>Verified</strong>, pick it here so the lock also applies to it. @everyone is always locked.</p>
+          <div class="form-row">${roleList('vcpw-lock', 'lockRoleIds', cfg.lockRoleIds)}</div>
+        </div>
+        <div class="card">
+          <div class="card-title">Staff Roles That Can Always Join</div>
+          <p style="font-size:.78rem;color:var(--muted);margin-bottom:.75rem;">These roles are never locked out of a password-protected VC. A role picked here wins over the lock list above.</p>
+          <div class="form-row">${roleList('vcpw-bypass', 'bypassRoleIds', cfg.bypassRoleIds)}</div>
+          <button type="submit" class="btn btn-primary">💾 Save Role Settings</button>
+        </div>
+      </form>
+
+      <form method="POST" action="/vc-password/panel?guild=${guildId}">
+        <div class="card">
+          <div class="card-title">Unlock Panel</div>
+          <p style="font-size:.78rem;color:var(--muted);margin-bottom:.75rem;">Posts the 🔑 Enter Password button members use to get into a locked VC. ${cfg.panelChannelId ? `Last posted in <strong>#${vcEsc(guild?.channels.cache.get(cfg.panelChannelId)?.name || cfg.panelChannelId)}</strong>.` : ''}</p>
+          <div class="form-row"><label>Post the panel in</label>
+            <select name="channelId"><option value="">— select a channel —</option>
+              ${textChannels.map(c => `<option value="${c.id}" ${cfg.panelChannelId === c.id ? 'selected' : ''}>#${vcEsc(c.name)}</option>`).join('')}
+            </select>
+          </div>
+          <button type="submit" class="btn btn-primary">📤 Post Unlock Panel</button>
+        </div>
+      </form>`;
+    res.send(renderLayout({ title: 'VC Passwords', guildId, currentPath: '/vc-password', allowedGuildIds, username: req.session.userTag, body }));
+  });
+
+  app.post('/vc-password/save', async (req, res) => {
+    const guildId = resolveGuildId(req); if (!guildId) return res.redirect('/');
+    const guild = client.guilds.cache.get(guildId);
+    const valid = (ids) => vcToArray(ids).filter(id => guild?.roles.cache.has(id));
+    const cfg = vcPwGuildCfg(guildId);
+    cfg.setterRoleIds = valid(req.body.setterRoleIds);
+    cfg.lockRoleIds   = valid(req.body.lockRoleIds);
+    cfg.bypassRoleIds = valid(req.body.bypassRoleIds);
+    await saveVcPwConfig();
+    res.redirect(`/vc-password?guild=${guildId}&flash=${encodeURIComponent('✅ Role settings saved. They apply to the next password that is set.')}`);
+  });
+
+  app.post('/vc-password/panel', async (req, res) => {
+    const guildId = resolveGuildId(req); if (!guildId) return res.redirect('/');
+    const guild = client.guilds.cache.get(guildId);
+    const ch = guild?.channels.cache.get(req.body.channelId);
+    if (!ch || ch.type !== ChannelType.GuildText) return res.redirect(`/vc-password?guild=${guildId}&flash=${encodeURIComponent('❌ Select a text channel to post in.')}`);
+    try {
+      await ch.send(vcPwPanelMessage());
+      vcPwGuildCfg(guildId).panelChannelId = ch.id; await saveVcPwConfig();
+      res.redirect(`/vc-password?guild=${guildId}&flash=${encodeURIComponent('✅ Unlock panel posted in #' + ch.name)}`);
+    } catch (err) {
+      res.redirect(`/vc-password?guild=${guildId}&flash=${encodeURIComponent('❌ Could not post there: ' + err.message)}`);
+    }
+  });
+
+  app.post('/vc-password/clear', async (req, res) => {
+    const guildId = resolveGuildId(req); if (!guildId) return res.redirect('/');
+    const guild = client.guilds.cache.get(guildId);
+    const channelId = req.body.channelId;
+    if (!guild || !vcPwLocks[guildId]?.[channelId]) return res.redirect(`/vc-password?guild=${guildId}&flash=${encodeURIComponent('❌ That channel is not locked.')}`);
+    try {
+      await vcPwUnlock(guild, channelId, 'unlocked from dashboard');
+      res.redirect(`/vc-password?guild=${guildId}&flash=${encodeURIComponent('✅ Voice channel unlocked.')}`);
+    } catch (err) {
+      res.redirect(`/vc-password?guild=${guildId}&flash=${encodeURIComponent('❌ ' + err.message)}`);
+    }
   });
 
   // ── tos / privacy ─────────────────────────────────────────────────────
